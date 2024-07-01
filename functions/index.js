@@ -5,7 +5,7 @@ const qr = require('qrcode');
 const Jimp = require('jimp');
 const QrCode = require('qrcode-reader');
 const { error } = require('firebase-functions/logger');
-const { Firestore } = require("firebase-admin/firestore")
+const { Firestore } = require("firebase-admin/firestore");
 
 const mqttTopic = 'data';
 var options = {
@@ -36,6 +36,13 @@ async function getUserList() {
     return dataList;
 }
 
+async function getSensorData(sensorId) {
+    const sensor = await admin.firestore().collection('sensors').doc(sensorId).get();
+    if (sensor.exists){
+        return sensor.data();
+    } return null;
+}
+
 async function getSensorList() {
     const result = await admin.firestore().collection('sensors').get();
     let dataList = [];
@@ -47,6 +54,45 @@ async function getSensorList() {
     console.log('sensorList ' + dataList)
     return dataList;
 }
+
+
+async function getCustomersDeviceData(customerId) {
+    const data = await admin.firestore().collection('sensors').where(`deviceRelations.${customerId}`, '!=', null).get();
+    const result = [];
+    if (data){
+        data.forEach((sensorDoc) => {
+            const sensorData = sensorDoc.data();
+            const { currentUsage, sensorId } = sensorData;
+            const { name, createdAt, id} = sensorData.deviceRelations[customerId];
+            const objData = {
+                'name' : name,
+                'createdAt': new Date(createdAt._nanoseconds),
+                'currentUsage': currentUsage,
+                'id': id,
+                'sensorId': sensorId
+            };
+            result.push(objData);
+        });
+    } else {
+        console.log('not exist');
+    }
+    return result;
+}
+
+async function deleteCustomersDevice(sensorId, customerId) {
+    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
+    await sensorDocRef.update({
+        [`deviceRelations.${customerId}`]: Firestore.FieldValue.delete()
+    });
+}
+
+async function updateDeviceName(sensorId, customerId, name) {
+    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
+    await sensorDocRef.update({
+        [`deviceRelations.${customerId}.name`]: name
+    });
+}
+
 
 async function updateSensorCurrentUsage(sensorId, oldValue,  currentUsage) {
     if (!sensorId) {
@@ -75,7 +121,8 @@ async function addDeviceRelation(sensorId, uuid, name){
             const time = Firestore.FieldValue.serverTimestamp()
             deviceRelations[uuid] = {
                 name: name,
-                createdAt: time
+                createdAt: time,
+                id: Date.now()
             };
             await sensorData.update({deviceRelations});
         }
@@ -93,6 +140,34 @@ function checkSensor(sensorId) {
         return sensorList.find(sensor => sensor.sensorId == sensorId);
     });
 }
+
+async function getCustomerId(header, response) {
+    if (!header || !header.startsWith('Bearer ')) {
+        response.status(401).send('Unauthorized');
+        return;
+    }
+    const idToken = header.split('Bearer ')[1];
+    await admin.auth().verifyIdToken(idToken).then(decodedToken => {
+        return decodedToken.uuid;
+    }).catch (error => {
+        console.error(`Failed to verifying token: ${error}`);
+        response.status(403).send('Unauthorized');
+    })
+}
+
+function getBearerToken(request) {
+    const authHeader = request.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        return authHeader.split('Bearer ')[1];
+    }
+    return null;
+}
+
+async function getCustomerId(request) {
+    const decodedToken = await admin.auth().verifyIdToken(getBearerToken(request));
+    return decodedToken.uid;
+}
+
 
 /**
  * Endpoints
@@ -126,76 +201,59 @@ exports.generateQrCode = functions.https.onRequest(async (request, response) => 
             return;
         }
         const qrString = await generateQRCode(sensorId);
-        // response.send(`<img src="${qrCodeString}" alt="QR Code for SensorId ${sensorId}" />`);
-        response.send(qrString);
+        response.send(`<img src="${qrString}" alt="QR Code for SensorId ${sensorId}" />`);
+        // response.send(qrString);
     } catch (error) {
-        console.error('Failed to generate qrString');
+        console.error('Failed to generate qrString' + error);
         response.status(500).send('Failed to to generate QR string');
     }
 })
 
-async function getCustomerId(header, response) {
-    if (!header || !header.startsWith('Bearer ')) {
-        response.status(401).send('Unauthorized');
+exports.decodeQr = functions.https.onRequest (async (request, response) => {
+    const customerId = await getCustomerId(request);
+    console.log(customerId);
+    const sensorId = request.body.qrString;
+    const deviceName = request.body.name;
+    console.log(`receive data from `);
+    if (!sensorId) {
+        response.status(400).send('QrSting has to be not null');
         return;
     }
-    const idToken = header.split('Bearer ')[1];
-    await admin.auth().verifyIdToken(idToken).then(decodedToken => {
-        return decodedToken.uuid;
-    }).catch (error => {
-        console.error(`Failed to verifying token: ${error}`);
-        response.status(403).send('Unauthorized');
-    })
-}
-
-function getBearerToken(request) {
-    const authHeader = request.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-        return authHeader.split('Bearer ')[1];
+    try {
+        console.log(sensorId);
+        addDeviceRelation('sensorId' + sensorId, customerId, deviceName);
+        response.send(sensorId);
+    } catch(error) {
+        console.error('Failed to decode qr');
+        response.status(500).send('Failed to decode qr string');
+        return;
     }
-    return null;
-}
-
-exports.decodeQr = functions.https.onRequest (async (request, response) => {
-    // admin.auth().verifyIdToken(request.headers.authorization)
-    // .then(decodedToken => {
-        const decodedToken = await admin.auth().verifyIdToken(getBearerToken(request));
-
-        // // const customerId = getCustomerId(request.headers.authorization, response).then( customerId => {
-            // console.log(decodedToken);
-            const customerId = decodedToken.uid;
-            console.log(customerId);
-        
-            const qrString = request.body.qrString;
-            const deviceName = request.body.name;
-            console.log(qrString);
-            if (!qrString) {
-                response.status(400).send('QrSting has to be not null');
-                return;
-            }
-            try {
-                const sensorId = decodeQrString(qrString).then(sensorId => {
-                    console.log(sensorId);
-                    addDeviceRelation('sensorId' + sensorId, customerId, deviceName);
-                    response.send(sensorId);
-                }).catch(error => {
-                    console.log('failed to decode the qr');
-                })
-            } catch(error) {
-                console.error('Failed to decode qr');
-                response.status(500).send('Failed to decode qr string');
-            }
-        // }).catch(error => {
-        //     console.log('error');
-        // })
-        
-    // }).catch(error => {
-    //     console.log('Failed to get user token' + error);
-    //     response.status(403).send('Unauthorized');
-    // });
-    
 })
 
+exports.customersDeviceList = functions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    return response.send(await getCustomersDeviceData(customerId));
+})
+
+exports.deleteDevice = functions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const sensorId = request.body.sensorId;
+    return response.send(await deleteCustomersDevice(sensorId, customerId));
+})
+
+exports.updateDeviceName = functions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const sensorId = request.body.sensorId;
+    const newName = request.body.name;
+    return response.send(await updateDeviceName(sensorId, customerId, newName));
+})
+
+
+exports.addAlert = functions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const sensorId = request.body.sensorId;
+    // Todo do add alert
+})
 /**
  * MQTT broker code
  */
@@ -216,7 +274,7 @@ mqttClient.on('message', async (topic, message) => {
 
     const data = JSON.parse(message);
     try {
-        const sensor = await checkSensor(data.sensorId);
+        const sensor = getSensorData(`sensorId${data.sensorId}`);
         const sensorId = 'sensorId' + data.sensorId;
         if (sensor) {
             console.log(`Already exist the data ${sensor}`);

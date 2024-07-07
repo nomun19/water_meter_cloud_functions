@@ -58,7 +58,7 @@ async function getSensorList() {
 
 async function getCustomersDeviceData(customerId) {
     const data = await admin.firestore().collection('sensors').where(`deviceRelations.${customerId}`, '!=', null).get();
-    const result = [];
+    const result = {"sensors":[]};
     if (data){
         data.forEach((sensorDoc) => {
             const sensorData = sensorDoc.data();
@@ -68,10 +68,9 @@ async function getCustomersDeviceData(customerId) {
                 'name' : name,
                 'createdAt': new Date(createdAt._nanoseconds),
                 'currentUsage': currentUsage,
-                'id': id,
                 'sensorId': sensorId
             };
-            result.push(objData);
+            result["sensors"].push(objData);
         });
     } else {
         console.log('not exist');
@@ -80,14 +79,14 @@ async function getCustomersDeviceData(customerId) {
 }
 
 async function deleteCustomersDevice(sensorId, customerId) {
-    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
+    const sensorDocRef = admin.firestore().collection('sensors').doc(`sensorId${sensorId}`);
     await sensorDocRef.update({
         [`deviceRelations.${customerId}`]: Firestore.FieldValue.delete()
     });
 }
 
 async function updateDeviceName(sensorId, customerId, name) {
-    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
+    const sensorDocRef = admin.firestore().collection('sensors').doc(`sensorId${sensorId}`);
     await sensorDocRef.update({
         [`deviceRelations.${customerId}.name`]: name
     });
@@ -118,15 +117,26 @@ async function addDeviceRelation(sensorId, uuid, name){
             console.log(`UserId ${uuid} already linked to the device`);
         } else {
             console.log(`userId ${uuid} does not exist, add new relation`);
-            const time = Firestore.FieldValue.serverTimestamp()
+            const time = Firestore.FieldValue.serverTimestamp();
             deviceRelations[uuid] = {
                 name: name,
-                createdAt: time,
-                id: Date.now()
+                createdAt: time
             };
-            await sensorData.update({deviceRelations});
+
+            const writeResult = await sensorData.update({deviceRelations});
+            return{
+                'resultType' : 'success',
+                'newSensorData' : {
+                'name' : name,
+                'createdAt': writeResult.writeTime.toDate(),
+                'currentUsage': data.currentUsage,
+                'sensorId': data.sensorId
+                }
+            };
         }
+        return {"resultType" : "alreadyLinkedDevice"};
     }
+    return {"resultType" : "deviceNotExist"};
 }
 
 
@@ -209,23 +219,23 @@ exports.generateQrCode = functions.https.onRequest(async (request, response) => 
     }
 })
 
-exports.decodeQr = functions.https.onRequest (async (request, response) => {
+exports.addDeviceRelation = functions.https.onRequest (async (request, response) => {
     const customerId = await getCustomerId(request);
     console.log(customerId);
-    const sensorId = request.body.qrString;
+    const sensorId = request.body.sensorId;
     const deviceName = request.body.name;
     console.log(`receive data from `);
-    if (!sensorId) {
-        response.status(400).send('QrSting has to be not null');
+    if (!sensorId || !deviceName) {
+        response.status(400).send({"resultType" : 'missingDatas'});
         return;
     }
     try {
         console.log(sensorId);
-        addDeviceRelation('sensorId' + sensorId, customerId, deviceName);
-        response.send(sensorId);
+        const deviceData = await addDeviceRelation('sensorId' + sensorId, customerId, deviceName);
+        response.send(deviceData);
     } catch(error) {
-        console.error('Failed to decode qr');
-        response.status(500).send('Failed to decode qr string');
+        console.error('Failed to decode qr '+ error);
+        response.status(500).send({"resultType" : 'qrDecodingFailed'});
         return;
     }
 })
@@ -235,7 +245,7 @@ exports.customersDeviceList = functions.https.onRequest(async (request, response
     return response.send(await getCustomersDeviceData(customerId));
 })
 
-exports.deleteDevice = functions.https.onRequest(async (request, response) => {
+exports.deleteDeviceRelation = functions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     const sensorId = request.body.sensorId;
     return response.send(await deleteCustomersDevice(sensorId, customerId));
@@ -258,58 +268,58 @@ exports.addAlert = functions.https.onRequest(async (request, response) => {
  * MQTT broker code
  */
 
-mqttClient.on('connect', () => {
-    console.log('MQTT client connected');
-    mqttClient.subscribe(mqttTopic, (err) => {
-        if (err) {
-            console.error('Failed to subscribe to topic:', mqttTopic, err);
-        } else {
-            console.log('Subscribed to topic:', mqttTopic);
-        }
-    });
-});
+// mqttClient.on('connect', () => {
+//     console.log('MQTT client connected');
+//     mqttClient.subscribe(mqttTopic, (err) => {
+//         if (err) {
+//             console.error('Failed to subscribe to topic:', mqttTopic, err);
+//         } else {
+//             console.log('Subscribed to topic:', mqttTopic);
+//         }
+//     });
+// });
 
-mqttClient.on('message', async (topic, message) => {
-    console.log('Received message:', topic, message.toString());
+// mqttClient.on('message', async (topic, message) => {
+//     console.log('Received message:', topic, message.toString());
 
-    const data = JSON.parse(message);
-    try {
-        const sensor = getSensorData(`sensorId${data.sensorId}`);
-        const sensorId = 'sensorId' + data.sensorId;
-        if (sensor) {
-            console.log(`Already exist the data ${sensor}`);
-            updateSensorCurrentUsage(sensorId, sensor.currentUsage, data.currentUsage)
-        } else {
-            console.log(`Not exist sensorId: ${sensorId}`);
-            console.log(sensorId);
-            const finalData = {
-                ...data,
-                createdAt: Firestore.FieldValue.serverTimestamp(),
-                lastUpdatedDate: Firestore.FieldValue.serverTimestamp()
-            }
-            await admin.firestore().collection('sensors').doc(sensorId).set(finalData);
-            console.log(`Sensor data saved with sensorId: ${sensorId}`);
-        }
-    } catch (error) {
-        console.error('Error checking sensor:',data.sensorId, error);
-    }
-});
+//     const data = JSON.parse(message);
+//     try {
+//         const sensor = getSensorData(`sensorId${data.sensorId}`);
+//         const sensorId = 'sensorId' + data.sensorId;
+//         if (sensor) {
+//             console.log(`Already exist the data ${sensor}`);
+//             updateSensorCurrentUsage(sensorId, sensor.currentUsage, data.currentUsage)
+//         } else {
+//             console.log(`Not exist sensorId: ${sensorId}`);
+//             console.log(sensorId);
+//             const finalData = {
+//                 ...data,
+//                 createdAt: Firestore.FieldValue.serverTimestamp(),
+//                 lastUpdatedDate: Firestore.FieldValue.serverTimestamp()
+//             }
+//             await admin.firestore().collection('sensors').doc(sensorId).set(finalData);
+//             console.log(`Sensor data saved with sensorId: ${sensorId}`);
+//         }
+//     } catch (error) {
+//         console.error('Error checking sensor:',data.sensorId, error);
+//     }
+// });
 
-mqttClient.on('error', (error) => {
-    console.error('MQTT client error:', error);
-});
+// mqttClient.on('error', (error) => {
+//     console.error('MQTT client error:', error);
+// });
 
-mqttClient.on('close', () => {
-    console.log('MQTT client connection closed');
-});
+// mqttClient.on('close', () => {
+//     console.log('MQTT client connection closed');
+// });
 
-mqttClient.on('reconnect', () => {
-    console.log('MQTT client reconnecting');
-});
+// mqttClient.on('reconnect', () => {
+//     console.log('MQTT client reconnecting');
+// });
 
-mqttClient.on('offline', () => {
-    console.log('MQTT client offline');
-});
+// mqttClient.on('offline', () => {
+//     console.log('MQTT client offline');
+// });
 
 
 

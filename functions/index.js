@@ -21,6 +21,27 @@ var options = {
  */
 const mqttClient = mqtt.connect(options);
 admin.initializeApp();
+const cloudFunctions = functions.region('europe-west1');
+
+
+class ResponseError{
+    constructor(resultType){
+        this.resultType = resultType;
+    }
+}
+
+const durationType = {
+    Daily: 'daily',
+    Weekly: 'weekly',
+    Monthly: 'monthly',
+    Year: 'year'
+}
+
+
+function checkDuration(value){
+    return Object.values(durationType).includes(value);
+}
+
 
 /**
  * interact with firestore
@@ -63,12 +84,18 @@ async function getCustomersDeviceData(customerId) {
         data.forEach((sensorDoc) => {
             const sensorData = sensorDoc.data();
             const { currentUsage, sensorId } = sensorData;
-            const { name, createdAt, id} = sensorData.deviceRelations[customerId];
+            const { name, createdAt } = sensorData.deviceRelations[customerId];
+            const customAlerts = sensorData.customAlerts || [];
+            const customAlertsResult = [];
+            for (const [type, alertObj] of Object.entries(customAlerts)) {
+                customAlertsResult.push({ type: type, value: alertObj.value });
+            }
             const objData = {
                 'name' : name,
                 'createdAt': new Date(createdAt._nanoseconds),
                 'currentUsage': currentUsage,
-                'sensorId': sensorId
+                'sensorId': sensorId,
+                'customAlerts': customAlertsResult
             };
             result["sensors"].push(objData);
         });
@@ -106,6 +133,39 @@ async function updateSensorCurrentUsage(sensorId, oldValue,  currentUsage) {
     }
 }
 
+
+async function getSensorsAlerts(sensorId) {
+    const sensorDoc = await admin.firestore().collection('sensors').doc(sensorId).get();
+    const result = [];
+    console.log(sensorDoc);
+    if (!sensorDoc.empty) {
+        const sensorData = sensorDoc.data();
+        const customAlerts = sensorData.customAlerts;
+        for (const [type, alertObj] of Object.entries(customAlerts)) {
+            result.push({ type: type, value: alertObj.value });
+        }
+    }
+    return result;
+}
+
+async function getCustomersSensorsAlerts(customerId) {
+    const sensorDoc = await admin.firestore().collection('sensors').where(`deviceRelations.${customerId}`, '!=', null).get();
+    const customAlertsResult = [];
+    if (sensorDoc){
+        sensorDoc.forEach((sensorDoc) => {
+            const sensorData = sensorDoc.data();
+            const { currentUsage, sensorId } = sensorData;
+            const customAlerts = sensorData.customAlerts || [];
+            for (const [type, alertObj] of Object.entries(customAlerts)) {
+                customAlertsResult.push({ type: type, value: alertObj.value });
+            }
+        });
+    } else {
+        console.log('not exist');
+    }
+    return customAlertsResult;
+}
+
 async function addDeviceRelation(sensorId, uuid, name){
     const sensorData = admin.firestore().collection('sensors').doc(sensorId);
     const result = await sensorData.get();
@@ -115,6 +175,7 @@ async function addDeviceRelation(sensorId, uuid, name){
         
         if (deviceRelations[uuid]) {
             console.log(`UserId ${uuid} already linked to the device`);
+            return new ResponseError('alreadyLinkedDevice');
         } else {
             console.log(`userId ${uuid} does not exist, add new relation`);
             const time = Firestore.FieldValue.serverTimestamp();
@@ -130,13 +191,67 @@ async function addDeviceRelation(sensorId, uuid, name){
                 'name' : name,
                 'createdAt': writeResult.writeTime.toDate(),
                 'currentUsage': data.currentUsage,
-                'sensorId': data.sensorId
+                'sensorId': data.sensorId,
+                'customAlerts': []
                 }
             };
         }
-        return {"resultType" : "alreadyLinkedDevice"};
     }
-    return {"resultType" : "deviceNotExist"};
+    return new ResponseError('deviceNotExist');
+}
+
+async function addCustomAlert(sensorId, customerId, value, type){
+    if (checkDuration(type)){
+        const sensorData = admin.firestore().collection('sensors').doc(sensorId);
+        const result = await sensorData.get();
+        if (result.exists){
+            const data  = result.data();
+            const deviceRelations = result.deviceRelations || {}
+            if (deviceRelations[customerId]){
+                console.log(`Customer does not connect to the device. customerId: ${customerId}, deviceId: ${sensorId}`);
+                return new ResponseError('noPermission');
+            }
+            const customAlerts = data.customAlerts || {}
+        
+            if (customAlerts[type]) {
+                console.log(`Type ${type} is already configured to the device`);
+                return new ResponseError('alreadyExistedType');
+            } else {
+                console.log(`Type ${type} does not exist, add new alert on device. deviceId : ${sensorId}`);
+                const time = Firestore.FieldValue.serverTimestamp();
+                customAlerts[type] = {
+                    value: value,
+                    type: type,
+                    createdAt: time
+                };
+
+                const writeResult = await sensorData.update({customAlerts});
+                return{
+                    'resultType' : 'success',
+                    'newSensorData' : {
+                    'name' : data.name,
+                    'createdAt': writeResult.writeTime.toDate(),
+                    'currentUsage': data.currentUsage,
+                    'sensorId': data.sensorId
+                    }
+                };
+            }
+        }
+    }
+}
+
+async function updateCustomAlert(sensorId, customerId, value, type){
+    const sensorDocRef = admin.firestore().collection('sensors').doc(`${sensorId}`);
+    await sensorDocRef.update({
+        [`customAlerts.${type}.value`]: value
+    });
+}
+
+async function deleteCustomAlert(sensorId, type){
+    const sensorDocRef = admin.firestore().collection('sensors').doc(`${sensorId}`);
+    await sensorDocRef.update({
+        [`customAlerts.${type}`]: Firestore.FieldValue.delete()
+    });
 }
 
 
@@ -183,7 +298,7 @@ async function getCustomerId(request) {
  * Endpoints
  */
 
-exports.getUsers = functions.https.onRequest(async (request, response) => {
+exports.getUsers = cloudFunctions.https.onRequest(async (request, response) => {
     try {
         const result = await getUserList();
         response.send(result);
@@ -193,7 +308,7 @@ exports.getUsers = functions.https.onRequest(async (request, response) => {
     }
 });
 
-exports.getSensorList = functions.https.onRequest(async (request, response) => {
+exports.getSensorList = cloudFunctions.https.onRequest(async (request, response) => {
     try {
         const result = await getSensorList();
         response.send(result);
@@ -203,7 +318,7 @@ exports.getSensorList = functions.https.onRequest(async (request, response) => {
     }
 })
 
-exports.generateQrCode = functions.https.onRequest(async (request, response) => {
+exports.generateQrCode = cloudFunctions.https.onRequest(async (request, response) => {
     try {
         const sensorId = request.query.sensorId;
         if (!sensorId) {
@@ -219,14 +334,14 @@ exports.generateQrCode = functions.https.onRequest(async (request, response) => 
     }
 })
 
-exports.addDeviceRelation = functions.https.onRequest (async (request, response) => {
+exports.addDeviceRelation = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     console.log(customerId);
     const sensorId = request.body.sensorId;
     const deviceName = request.body.name;
     console.log(`receive data from `);
     if (!sensorId || !deviceName) {
-        response.status(400).send({"resultType" : 'missingDatas'});
+        response.status(400).send(new ResponseError('missingDatas'));
         return;
     }
     try {
@@ -235,23 +350,39 @@ exports.addDeviceRelation = functions.https.onRequest (async (request, response)
         response.send(deviceData);
     } catch(error) {
         console.error('Failed to decode qr '+ error);
-        response.status(500).send({"resultType" : 'qrDecodingFailed'});
+        response.status(500).send(new ResponseError('qrDecodingFailed'));
         return;
     }
 })
 
-exports.customersDeviceList = functions.https.onRequest(async (request, response) => {
+exports.getSensorsAlertConfigs = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const sensorId = request.query.sensorId;
+    response.send(await getSensorsAlerts(sensorId));
+})
+
+exports.getSensorsAlertsConfigsForWeb = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.query.sensorId;
+    response.send(await getSensorsAlerts(sensorId));
+})
+
+exports.getCustomersCustomAlerts = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = request.query.customerId;
+    response.send(await getCustomersSensorsAlerts(customerId));
+})
+
+exports.customersDeviceList = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     return response.send(await getCustomersDeviceData(customerId));
 })
 
-exports.deleteDeviceRelation = functions.https.onRequest(async (request, response) => {
+exports.deleteDeviceRelation = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     const sensorId = request.body.sensorId;
     return response.send(await deleteCustomersDevice(sensorId, customerId));
 })
 
-exports.updateDeviceName = functions.https.onRequest(async (request, response) => {
+exports.updateDeviceName = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     const sensorId = request.body.sensorId;
     const newName = request.body.name;
@@ -259,10 +390,27 @@ exports.updateDeviceName = functions.https.onRequest(async (request, response) =
 })
 
 
-exports.addAlert = functions.https.onRequest(async (request, response) => {
+exports.addAlert = cloudFunctions.https.onRequest(async (request, response) => {
+    console.log('orj irseen');
     const customerId = await getCustomerId(request);
-    const sensorId = request.body.sensorId;
-    // Todo do add alert
+    // const sensorId = request.body.sensorId;
+    const { sensorId, value, type } = request.body;
+    console.log(value);
+    console.log(sensorId);
+    console.log(type);
+    return response.send(await addCustomAlert(sensorId, customerId, value, type));
+})
+
+exports.updateAlert = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const { sensorId, value, type } = request.body;
+    return response.send(await updateCustomAlert(sensorId, customerId, value, type));
+})
+
+exports.deleteAlert = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const { sensorId, type } = request.body;
+    return response.send(await deleteCustomAlert(sensorId, type));
 })
 /**
  * MQTT broker code

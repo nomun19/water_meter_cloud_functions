@@ -240,11 +240,16 @@ async function addCustomAlert(sensorId, customerId, value, type){
     }
 }
 
-async function updateCustomAlert(sensorId, customerId, value, type){
+
+async function updateCustomAlert(sensorId, value, type) {
     const sensorDocRef = admin.firestore().collection('sensors').doc(`${sensorId}`);
-    await sensorDocRef.update({
-        [`customAlerts.${type}.value`]: value
-    });
+    await sensorDocRef.set({
+        customAlerts: {
+            [type]: {
+                value: value
+            }
+        }
+    }, { merge: true });
 }
 
 async function deleteCustomAlert(sensorId, type){
@@ -391,20 +396,15 @@ exports.updateDeviceName = cloudFunctions.https.onRequest(async (request, respon
 
 
 exports.addAlert = cloudFunctions.https.onRequest(async (request, response) => {
-    console.log('orj irseen');
     const customerId = await getCustomerId(request);
-    // const sensorId = request.body.sensorId;
     const { sensorId, value, type } = request.body;
-    console.log(value);
-    console.log(sensorId);
-    console.log(type);
     return response.send(await addCustomAlert(sensorId, customerId, value, type));
 })
 
 exports.updateAlert = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     const { sensorId, value, type } = request.body;
-    return response.send(await updateCustomAlert(sensorId, customerId, value, type));
+    return response.send(await updateCustomAlert(sensorId, value, type));
 })
 
 exports.deleteAlert = cloudFunctions.https.onRequest(async (request, response) => {

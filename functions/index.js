@@ -106,14 +106,14 @@ async function getCustomersDeviceData(customerId) {
 }
 
 async function deleteCustomersDevice(sensorId, customerId) {
-    const sensorDocRef = admin.firestore().collection('sensors').doc(`sensorId${sensorId}`);
+    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
     await sensorDocRef.update({
         [`deviceRelations.${customerId}`]: Firestore.FieldValue.delete()
     });
 }
 
 async function updateDeviceName(sensorId, customerId, name) {
-    const sensorDocRef = admin.firestore().collection('sensors').doc(`sensorId${sensorId}`);
+    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
     await sensorDocRef.update({
         [`deviceRelations.${customerId}.name`]: name
     });
@@ -137,7 +137,6 @@ async function updateSensorCurrentUsage(sensorId, oldValue,  currentUsage) {
 async function getSensorsAlerts(sensorId) {
     const sensorDoc = await admin.firestore().collection('sensors').doc(sensorId).get();
     const result = [];
-    console.log(sensorDoc);
     if (!sensorDoc.empty) {
         const sensorData = sensorDoc.data();
         const customAlerts = sensorData.customAlerts;
@@ -154,7 +153,6 @@ async function getCustomersSensorsAlerts(customerId) {
     if (sensorDoc){
         sensorDoc.forEach((sensorDoc) => {
             const sensorData = sensorDoc.data();
-            const { currentUsage, sensorId } = sensorData;
             const customAlerts = sensorData.customAlerts || [];
             for (const [type, alertObj] of Object.entries(customAlerts)) {
                 customAlertsResult.push({ type: type, value: alertObj.value });
@@ -242,7 +240,7 @@ async function addCustomAlert(sensorId, customerId, value, type){
 
 
 async function updateCustomAlert(sensorId, value, type) {
-    const sensorDocRef = admin.firestore().collection('sensors').doc(`${sensorId}`);
+    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
     await sensorDocRef.set({
         customAlerts: {
             [type]: {
@@ -253,12 +251,107 @@ async function updateCustomAlert(sensorId, value, type) {
 }
 
 async function deleteCustomAlert(sensorId, type){
-    const sensorDocRef = admin.firestore().collection('sensors').doc(`${sensorId}`);
+    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
     await sensorDocRef.update({
         [`customAlerts.${type}`]: Firestore.FieldValue.delete()
     });
 }
 
+async function getSensorsLogData(sensorId) {
+    const sensorDoc = await admin.firestore().collection('logs').where('sensorId', '==', sensorId).get();
+    const result = [];
+    if (sensorDoc){
+        sensorDoc.forEach((sensorDoc) => {
+            const sensorData = sensorDoc.data();
+            const { currentUsage, recordedDate } = sensorData;
+            result.push({usage: currentUsage, recordedDate: recordedDate})
+        });
+    } else {
+        console.log('not exist');
+        return result;
+    }
+    return {
+        hourlyData: groupByHour(result),
+        dailyData: groupByDay(result),
+        weeklyData: groupByWeek(result)
+    };
+}
+
+function groupByHour(data) {
+    const hourlyData = {};
+
+    data.forEach(item => {
+        const date = new Date(item.recordedDate);
+        const hourKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')} ${String(date.getUTCHours()).padStart(2, '0')}:00`;
+
+        if (!hourlyData[hourKey]) {
+            hourlyData[hourKey] = [];
+        }
+
+        hourlyData[hourKey].push(item.usage);
+    });
+
+    return aggregateData(hourlyData);
+}
+
+function groupByDay(data) {
+    const dailyData = {};
+
+    data.forEach(item => {
+        const date = new Date(item.recordedDate);
+        const dayKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+
+        if (!dailyData[dayKey]) {
+            dailyData[dayKey] = [];
+        }
+
+        dailyData[dayKey].push(item.usage);
+    });
+
+    return aggregateData(dailyData);
+}
+
+function groupByWeek(data) {
+    const weeklyData = {};
+
+    data.forEach(item => {
+        const date = new Date(item.recordedDate);
+        const weekKey = `${date.getUTCFullYear()}-W${String(getWeekNumber(date)).padStart(2, '0')}`;
+
+        if (!weeklyData[weekKey]) {
+            weeklyData[weekKey] = [];
+        }
+
+        weeklyData[weekKey].push(item.usage);
+    });
+
+    return aggregateData(weeklyData);
+}
+
+function getWeekNumber(date) {
+    const start = new Date(date.getUTCFullYear(), 0, 1);
+    const diff = (date - start + (start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000) / 86400000;
+    return Math.floor((diff + start.getUTCDay() + 1) / 7);
+}
+
+function aggregateData(groupedData) {
+    const aggregatedData = [];
+
+    for (const key in groupedData) {
+        const values = groupedData[key];
+        const maxUsage = Math.max(...values);
+        aggregatedData.push({ period: key, usage: maxUsage });
+    }
+
+    return aggregatedData;
+}
+
+function formatData(data) {
+    return data.map(item => ({
+        period: item.period,
+        usage: item.usage
+    }));
+}
 
 /**
  * Other useful functions
@@ -351,7 +444,7 @@ exports.addDeviceRelation = cloudFunctions.https.onRequest(async (request, respo
     }
     try {
         console.log(sensorId);
-        const deviceData = await addDeviceRelation('sensorId' + sensorId, customerId, deviceName);
+        const deviceData = await addDeviceRelation(sensorId, customerId, deviceName);
         response.send(deviceData);
     } catch(error) {
         console.error('Failed to decode qr '+ error);
@@ -404,13 +497,24 @@ exports.addAlert = cloudFunctions.https.onRequest(async (request, response) => {
 exports.updateAlert = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     const { sensorId, value, type } = request.body;
-    return response.send(await updateCustomAlert(sensorId, value, type));
+    try {
+        await updateCustomAlert(sensorId, value, type)
+        return response.send();
+    } catch(e){
+        response.status(500).send(new ResponseError('failedToUpdateCustomAlert'));
+        return;
+    }
 })
 
 exports.deleteAlert = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     const { sensorId, type } = request.body;
     return response.send(await deleteCustomAlert(sensorId, type));
+})
+
+exports.getSensorsData = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.query.sensorId;
+    return response.send(await getSensorsLogData(sensorId));
 })
 /**
  * MQTT broker code
@@ -432,22 +536,14 @@ exports.deleteAlert = cloudFunctions.https.onRequest(async (request, response) =
 
 //     const data = JSON.parse(message);
 //     try {
-//         const sensor = getSensorData(`sensorId${data.sensorId}`);
-//         const sensorId = 'sensorId' + data.sensorId;
-//         if (sensor) {
-//             console.log(`Already exist the data ${sensor}`);
-//             updateSensorCurrentUsage(sensorId, sensor.currentUsage, data.currentUsage)
-//         } else {
-//             console.log(`Not exist sensorId: ${sensorId}`);
-//             console.log(sensorId);
-//             const finalData = {
-//                 ...data,
-//                 createdAt: Firestore.FieldValue.serverTimestamp(),
-//                 lastUpdatedDate: Firestore.FieldValue.serverTimestamp()
-//             }
-//             await admin.firestore().collection('sensors').doc(sensorId).set(finalData);
-//             console.log(`Sensor data saved with sensorId: ${sensorId}`);
+//         const finalData = {
+//             sensorId: 'sensorId' + data.sensorId,
+//             recordedDate: data.recordedDate,
+//             currentUsage: data.currentUsage,
+//             createdAt: Firestore.FieldValue.serverTimestamp()
 //         }
+//         await admin.firestore().collection('logs').add(finalData);
+//         console.log(`Sensor data saved with sensorId: ${data.sensorId}`);
 //     } catch (error) {
 //         console.error('Error checking sensor:',data.sensorId, error);
 //     }

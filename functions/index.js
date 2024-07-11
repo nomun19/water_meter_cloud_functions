@@ -257,101 +257,6 @@ async function deleteCustomAlert(sensorId, type){
     });
 }
 
-async function getSensorsLogData(sensorId) {
-    const sensorDoc = await admin.firestore().collection('logs').where('sensorId', '==', sensorId).get();
-    const result = [];
-    if (sensorDoc){
-        sensorDoc.forEach((sensorDoc) => {
-            const sensorData = sensorDoc.data();
-            const { currentUsage, recordedDate } = sensorData;
-            result.push({usage: currentUsage, recordedDate: recordedDate})
-        });
-    } else {
-        console.log('not exist');
-        return result;
-    }
-    return {
-        hourlyData: groupByHour(result),
-        dailyData: groupByDay(result),
-        weeklyData: groupByWeek(result)
-    };
-}
-
-function groupByHour(data) {
-    const hourlyData = {};
-
-    data.forEach(item => {
-        const date = new Date(item.recordedDate);
-        const hourKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')} ${String(date.getUTCHours()).padStart(2, '0')}:00`;
-
-        if (!hourlyData[hourKey]) {
-            hourlyData[hourKey] = [];
-        }
-
-        hourlyData[hourKey].push(item.usage);
-    });
-
-    return aggregateData(hourlyData);
-}
-
-function groupByDay(data) {
-    const dailyData = {};
-
-    data.forEach(item => {
-        const date = new Date(item.recordedDate);
-        const dayKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
-
-        if (!dailyData[dayKey]) {
-            dailyData[dayKey] = [];
-        }
-
-        dailyData[dayKey].push(item.usage);
-    });
-
-    return aggregateData(dailyData);
-}
-
-function groupByWeek(data) {
-    const weeklyData = {};
-
-    data.forEach(item => {
-        const date = new Date(item.recordedDate);
-        const weekKey = `${date.getUTCFullYear()}-W${String(getWeekNumber(date)).padStart(2, '0')}`;
-
-        if (!weeklyData[weekKey]) {
-            weeklyData[weekKey] = [];
-        }
-
-        weeklyData[weekKey].push(item.usage);
-    });
-
-    return aggregateData(weeklyData);
-}
-
-function getWeekNumber(date) {
-    const start = new Date(date.getUTCFullYear(), 0, 1);
-    const diff = (date - start + (start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000) / 86400000;
-    return Math.floor((diff + start.getUTCDay() + 1) / 7);
-}
-
-function aggregateData(groupedData) {
-    const aggregatedData = [];
-
-    for (const key in groupedData) {
-        const values = groupedData[key];
-        const maxUsage = Math.max(...values);
-        aggregatedData.push({ period: key, usage: maxUsage });
-    }
-
-    return aggregatedData;
-}
-
-function formatData(data) {
-    return data.map(item => ({
-        period: item.period,
-        usage: item.usage
-    }));
-}
 
 /**
  * Other useful functions
@@ -512,10 +417,7 @@ exports.deleteAlert = cloudFunctions.https.onRequest(async (request, response) =
     return response.send(await deleteCustomAlert(sensorId, type));
 })
 
-exports.getSensorsData = cloudFunctions.https.onRequest(async (request, response) => {
-    const sensorId = request.query.sensorId;
-    return response.send(await getSensorsLogData(sensorId));
-})
+
 /**
  * MQTT broker code
  */

@@ -6,6 +6,7 @@ const Jimp = require('jimp');
 const QrCode = require('qrcode-reader');
 const { error } = require('firebase-functions/logger');
 const { Firestore } = require("firebase-admin/firestore");
+const geofire = require('geofire-common');
 const { DateTime } = require('luxon');
 
 const mqttTopic = 'data';
@@ -25,6 +26,7 @@ admin.initializeApp({
     databaseURL: 'https://console.firebase.google.com/v1/r/project/water-meter-84a08/firestore/indexes?create_composite=Ckxwcm9qZWN0cy93YXRlci1tZXRlci04NGEwOC9kYXRhYmFzZXMvKGRlZmF1bHQpL2NvbGxlY3Rpb25Hcm91cHMvMTgvaW5kZXhlcy9fEAEaDAoIc2Vuc29ySWQQARoQCgxyZWNvcmRlZERhdGUQAhoMCghfX25hbWVfXxAC'
 });
 const cloudFunctions = functions.region('europe-west1');
+const secondsInADay =  60 * 60 * 24;
 
 
 class ResponseError{
@@ -50,6 +52,27 @@ const durationType = {
 
 function checkDuration(value){
     return Object.values(durationType).includes(value);
+}
+
+function calculateAverageUsageInLifetime(creationDate, lastUpdateDate, currentUsage){
+    var lifetimeInDays = (lastUpdateDate - creationDate)/secondsInADay;
+    console.log(lifetimeInDays);
+    console.log(lastUpdateDate - creationDate);
+    const result = {};
+
+    if(lifetimeInDays < 1)
+        return result;
+    result["averageDailyUsage"] = currentUsage/(lifetimeInDays);
+
+    if(lifetimeInDays < 7)
+        return result;
+    result["averageWeeklyUsage"] = currentUsage/(lifetimeInDays/7);
+
+    if(lifetimeInDays < 30)
+        return result;
+    result["averageMonthlyUsage"] = currentUsage/(lifetimeInDays/30);
+
+    return result;
 }
 
 
@@ -90,22 +113,30 @@ async function getSensorList() {
 async function getCustomersDeviceData(customerId) {
     const data = await admin.firestore().collection('sensors').where(`deviceRelations.${customerId}`, '!=', null).get();
     const result = {"sensors":[]};
+
     if (data){
         data.forEach((sensorDoc) => {
             const sensorData = sensorDoc.data();
-            const { currentUsage, sensorId } = sensorData;
-            const { name, createdAt } = sensorData.deviceRelations[customerId];
+            const { currentUsage, sensorId, location, createdAt, updatedAt } = sensorData;
+            const deviceRelation = sensorData.deviceRelations[customerId];
             const customAlerts = sensorData.customAlerts || [];
             const customAlertsResult = [];
             for (const [type, alertObj] of Object.entries(customAlerts)) {
                 customAlertsResult.push({ type: type, value: alertObj.value });
             }
+            const { averageDailyUsage, averageWeeklyUsage, averageMonthlyUsage } = calculateAverageUsageInLifetime(createdAt, updatedAt, currentUsage);
             const objData = {
-                'name' : name,
-                'createdAt': new Date(createdAt._nanoseconds),
+                'name' : deviceRelation.name,
+                'createdAt': new Date(deviceRelation.createdAt._nanoseconds),
                 'currentUsage': currentUsage,
                 'sensorId': sensorId,
-                'customAlerts': customAlertsResult
+                'customAlerts': customAlertsResult,
+                'location': location,
+                'sensorCreatedAt': new Date(createdAt._nanoseconds),
+                'updatedAt': new Date(updatedAt._nanoseconds),
+                'averageDailyUsage' : averageDailyUsage?.toFixed(2) ?? 0,
+                'averageWeeklyUsage' : averageWeeklyUsage?.toFixed(2) ?? 0,
+                'averageMonthlyUsage': averageMonthlyUsage?.toFixed(2) ?? 0,
             };
             result["sensors"].push(objData);
         });
@@ -180,7 +211,7 @@ async function addDeviceRelation(sensorId, uuid, name){
     if (result.exists){
         const data  = result.data();
         const deviceRelations = data.deviceRelations || {}
-        
+
         if (deviceRelations[uuid]) {
             console.log(`UserId ${uuid} already linked to the device`);
             return new ResponseError('alreadyLinkedDevice');
@@ -220,7 +251,7 @@ async function addCustomAlert(sensorId, customerId, value, type){
                 return new ResponseError('noPermission');
             }
             const customAlerts = data.customAlerts || {}
-        
+
             if (customAlerts[type]) {
                 console.log(`Type ${type} is already configured to the device`);
                 return new ResponseError('alreadyExistedType');
@@ -265,6 +296,34 @@ async function deleteCustomAlert(sensorId, type){
     await sensorDocRef.update({
         [`customAlerts.${type}`]: Firestore.FieldValue.delete()
     });
+}
+
+async function getSensorsNearAPoint(point, radiusInKm)
+{
+    console.log(point);
+    console.log(radiusInKm);
+    //Calculate bounding box values
+    let dY = radiusInKm / 111.11;
+    let dX = dY / Math.cos(geofire.degreesToRadians(point.lat));
+
+    const results = await admin.firestore().collection('sensors')
+        .orderBy("location.longitude")
+        .where("location.latitude", ">=", point.lat - dY)
+        .where("location.latitude", "<=", point.lat + dY)
+        .where("location.longitude", ">=", point.lon - dX)
+        .where("location.longitude", "<=", point.lon + dX).get();
+
+    var dataList = {"sensors":[]};
+    results.forEach(doc => {
+        const data = doc.data();
+        console.log(data);
+        let distance = geofire.distanceBetween([data.location.latitude, data.location.longitude], [point.lat, point.lon]);
+        if(distance <= radiusInKm){
+            dataList["sensors"].push(doc.data());
+        }
+    });
+
+    return dataList;
 }
 
 function formatTimestamp(timestamp, type) {
@@ -323,7 +382,7 @@ async function getSensorsDataByTime(sensorId, fromDate, toDate, type){
         .orderBy('recordedDate', 'desc')
         .limit(1)
         .get();
-    
+
     const result = [];
     if (!sensorDocRef.empty) {
         sensorDocRef.forEach(doc => {
@@ -418,11 +477,11 @@ async function getSensorsLogData(sensorId) {
     var hour = 18;
     var endTime = new Date();
     var startTime = new Date();
-    
+
     for (let i = 1; i <= 3; i++) {
         const startTime = new Date(endTime);
         startTime.setHours(endTime.getHours() - 6);
-        
+
         const sensorDocRef = await admin.firestore().collection('logs')
             .where('sensorId', '==', 'sensorId1')
             .where('recordedDate', '>=', startTime.getTime())
@@ -430,7 +489,7 @@ async function getSensorsLogData(sensorId) {
             .orderBy('recordedDate', 'desc')
             .limit(1)
             .get();
-        
+
         if (!sensorDocRef.empty) {
             console.log(sensorDocRef.data());
             // sensorDocRef.forEach(doc => {
@@ -439,7 +498,7 @@ async function getSensorsLogData(sensorId) {
         } else {
             console.log('No data found for period:', startTime, 'to', endTime);
         }
-        
+
         // Update endTime for the next iteration
         endTime.setHours(endTime.getHours() - 6);
     }
@@ -593,6 +652,19 @@ function getLocalTimeZone() {
 /**
  * Endpoints
  */
+
+exports.getSensorsNearMe = cloudFunctions.https.onRequest(async (request, response) => {
+    try {
+        const location = request.body.location;
+        const radius = request.body.radius;
+        const result = await getSensorsNearAPoint(location, radius);
+        response.send(result);
+    } catch (error) {
+        console.error(error);
+        response.status(500).send('Failed to retrieving sensors near position');
+    }
+});
+
 
 exports.getUsers = cloudFunctions.https.onRequest(async (request, response) => {
     try {
@@ -780,7 +852,7 @@ mqttClient.on('message', async (topic, message) => {
     try {
 
         const sensorData = await admin.firestore().collection('logs').add({...data});
-        
+
         // await admin.firestore().collection('logs').doc(`${getStartOfDay(data.recordedDate)}`).add(finalData);
         console.log(`Sensor data saved with sensorId: ${data.sensorId}`);
     } catch (error) {

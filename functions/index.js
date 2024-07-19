@@ -6,6 +6,7 @@ const Jimp = require('jimp');
 const QrCode = require('qrcode-reader');
 const { error } = require('firebase-functions/logger');
 const { Firestore } = require("firebase-admin/firestore");
+const { DateTime } = require('luxon');
 
 const mqttTopic = 'data';
 var options = {
@@ -20,13 +21,22 @@ var options = {
  * Initialize the configurations
  */
 const mqttClient = mqtt.connect(options);
-admin.initializeApp();
+admin.initializeApp({
+    databaseURL: 'https://console.firebase.google.com/v1/r/project/water-meter-84a08/firestore/indexes?create_composite=Ckxwcm9qZWN0cy93YXRlci1tZXRlci04NGEwOC9kYXRhYmFzZXMvKGRlZmF1bHQpL2NvbGxlY3Rpb25Hcm91cHMvMTgvaW5kZXhlcy9fEAEaDAoIc2Vuc29ySWQQARoQCgxyZWNvcmRlZERhdGUQAhoMCghfX25hbWVfXxAC'
+});
 const cloudFunctions = functions.region('europe-west1');
 
 
 class ResponseError{
     constructor(resultType){
         this.resultType = resultType;
+    }
+}
+
+class ChartData{
+    constructor(period, usage){
+        this.period = period;
+        this.usage = usage
     }
 }
 
@@ -257,6 +267,259 @@ async function deleteCustomAlert(sensorId, type){
     });
 }
 
+function formatTimestamp(timestamp, type) {
+    const dateTime = DateTime.fromMillis(timestamp).setZone('Europe/Rome');
+    let formattedDate;
+
+    switch (type) {
+        case 'hour':
+            formattedDate = dateTime.toFormat('HH:mm');
+            break;
+        case 'day':
+            formattedDate = dateTime.toFormat('yyyy-MM-dd');
+            break;
+        case 'month':
+            formattedDate = dateTime.toFormat('yyyy-MM');
+            break;
+        case 'year':
+            formattedDate = dateTime.toFormat('yyyy');
+            break;
+        default:
+            throw new Error('Invalid type: ' + type);
+    }
+
+    return formattedDate;
+}
+
+function getFormattedDatePart(timestamp, type) {
+    const dateTime = DateTime.fromMillis(timestamp).setZone('Europe/Rome');
+    let result;
+
+    switch (type) {
+        case 'hour':
+            result = dateTime.hour; // returns hour (0-23)
+            break;
+        case 'day':
+            result = dateTime.day; // returns day of the month (1-31)
+            break;
+        case 'month':
+            result = dateTime.month; // returns month (1-12)
+            break;
+        case 'year':
+            result = dateTime.year; // returns year
+            break;
+        default:
+            throw new Error('Invalid type: ' + type);
+    }
+
+    return result;
+}
+
+async function getSensorsDataByTime(sensorId, fromDate, toDate, type){
+    const sensorDocRef = await admin.firestore().collection('logs')
+        .where('sensorId', '==', sensorId)
+        .where('recordedDate', '>=', fromDate)
+        .where('recordedDate', '<=', toDate)
+        .orderBy('recordedDate', 'desc')
+        .limit(1)
+        .get();
+    
+    const result = [];
+    if (!sensorDocRef.empty) {
+        sensorDocRef.forEach(doc => {
+            var res = doc.data();
+        result.push(new ChartData(getFormattedDatePart(res.recordedDate, type),res.currentUsage));
+        });
+    } else {
+        console.log('No data found for period:', fromDate, 'to', toDate);
+        return null;
+    }
+    return result;
+}
+
+function clearMinutes(date){
+    date.setMinutes(0);
+    date.setSeconds(0);
+    date.setMilliseconds(0);
+    return date;
+}
+
+async function getSensorsLastFewHoursData(sensorId, lastHours){
+    const endDate = clearMinutes(new Date());
+    var fromDate = clearMinutes(new Date());
+    fromDate = fromDate.setHours(endDate.getHours() - lastHours);
+    var result = [];
+    for (i=1; i<=lastHours; i++){
+        var data = await getSensorsDataByTime(sensorId, fromDate, endDate.getTime(), 'hour');
+        if (data == null){
+            data = [new ChartData(getFormattedDatePart(fromDate, 'hour'), 0)];
+        }
+        result = [...result, ...data];
+        fromDate = new Date(fromDate).setHours(new Date(fromDate).getHours() + 1);
+    }
+    return result;
+}
+
+async function getSensorsLogDataByDay(sensorId, fromDate, endDate){
+    fromDate = getStartOfDay(fromDate.getTime());
+    endDate = getStartOfDay(endDate.getTime());
+    var diffDay = Math.round((endDate - fromDate) / (1000 * 3600 * 24));
+    var result = [];
+    for(i=1; i<=diffDay; i++){
+        var newEndDate = getEndOfDay(fromDate);
+        var data = await getSensorsDataByTime(sensorId, fromDate, newEndDate, 'day');
+        if (data == null){
+            data = [new ChartData(getFormattedDatePart(newEndDate, 'day'), 0)];
+        }
+        result = [...result, ...data];
+        fromDate = new Date(fromDate).setDate(new Date(fromDate).getDate() + 1);
+    }
+    return result;
+}
+
+async function getSensorsLastFewDaysLogData(sensorId, lastFewDays){
+    var toDate = new Date();
+    var fromDate = new Date(new Date().setDate(toDate.getDate() - lastFewDays));
+    return getSensorsLogDataByDay(sensorId, fromDate, toDate);
+}
+
+async function getSensorsMonthsLogsData(sensorId, fromDate, endDate){
+    console.log(fromDate);
+    fromDate = getStartOfMonth(fromDate.getTime());
+    endDate = getEndOfMonth(endDate.getTime());
+    console.log(fromDate);
+    var diffMonth = Math.round((endDate - fromDate) / (1000 * 60 * 60 * 24 * 7 * 4));
+    console.log(diffMonth);
+    var result = [];
+    for (i=1; i<=diffMonth; i++){
+        var newEndDate = getEndOfMonth(fromDate);
+        var data = await getSensorsDataByTime(sensorId, fromDate, newEndDate, 'month');
+        console.log(data);
+        if (data == null){
+            data = [new ChartData(getFormattedDatePart(newEndDate, 'month'), 0)];
+        }
+        result = [...result, ...data];
+        fromDate = new Date(fromDate).setMonth(new Date(fromDate).getMonth() + 1);
+        console.log(fromDate);
+    }
+    return result;
+}
+
+async function getSensorsLastMonthsLogs(sensorId, lastFewMonths){
+    var endDate = new Date();
+    var fromDate = new Date(new Date().setMonth(endDate.getMonth() - lastFewMonths))
+    return getSensorsMonthsLogsData(sensorId, fromDate, endDate);
+
+}
+
+async function getSensorsLogData(sensorId) {
+    const nowDate = getStartOfDay(new Date().getTime());
+    console.log(nowDate);
+    var hour = 18;
+    var endTime = new Date();
+    var startTime = new Date();
+    
+    for (let i = 1; i <= 3; i++) {
+        const startTime = new Date(endTime);
+        startTime.setHours(endTime.getHours() - 6);
+        
+        const sensorDocRef = await admin.firestore().collection('logs')
+            .where('sensorId', '==', 'sensorId1')
+            .where('recordedDate', '>=', startTime.getTime())
+            .where('recordedDate', '<=', endTime.getTime())
+            .orderBy('recordedDate', 'desc')
+            .limit(1)
+            .get();
+        
+        if (!sensorDocRef.empty) {
+            console.log(sensorDocRef.data());
+            // sensorDocRef.forEach(doc => {
+            // console.log(doc.data());
+            // });
+        } else {
+            console.log('No data found for period:', startTime, 'to', endTime);
+        }
+        
+        // Update endTime for the next iteration
+        endTime.setHours(endTime.getHours() - 6);
+    }
+}
+
+function groupByHour(data) {
+    const hourlyData = {};
+
+    data.forEach(item => {
+        const date = new Date(item.recordedDate);
+        const hourKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')} ${String(date.getUTCHours()).padStart(2, '0')}:00`;
+
+        if (!hourlyData[hourKey]) {
+            hourlyData[hourKey] = [];
+        }
+
+        hourlyData[hourKey].push(item.usage);
+    });
+
+    return aggregateData(hourlyData);
+}
+
+function groupByDay(data) {
+    const dailyData = {};
+
+    data.forEach(item => {
+        const date = new Date(item.recordedDate);
+        const dayKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+
+        if (!dailyData[dayKey]) {
+            dailyData[dayKey] = [];
+        }
+
+        dailyData[dayKey].push(item.usage);
+    });
+
+    return aggregateData(dailyData);
+}
+
+function groupByWeek(data) {
+    const weeklyData = {};
+
+    data.forEach(item => {
+        const date = new Date(item.recordedDate);
+        const weekKey = `${date.getUTCFullYear()}-W${String(getWeekNumber(date)).padStart(2, '0')}`;
+
+        if (!weeklyData[weekKey]) {
+            weeklyData[weekKey] = [];
+        }
+
+        weeklyData[weekKey].push(item.usage);
+    });
+
+    return aggregateData(weeklyData);
+}
+
+function getWeekNumber(date) {
+    const start = new Date(date.getUTCFullYear(), 0, 1);
+    const diff = (date - start + (start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000) / 86400000;
+    return Math.floor((diff + start.getUTCDay() + 1) / 7);
+}
+
+function aggregateData(groupedData) {
+    const aggregatedData = [];
+
+    for (const key in groupedData) {
+        const values = groupedData[key];
+        const maxUsage = Math.max(...values);
+        aggregatedData.push({ period: key, usage: maxUsage });
+    }
+
+    return aggregatedData;
+}
+
+function formatData(data) {
+    return data.map(item => ({
+        period: item.period,
+        usage: item.usage
+    }));
+}
 
 /**
  * Other useful functions
@@ -294,6 +557,36 @@ function getBearerToken(request) {
 async function getCustomerId(request) {
     const decodedToken = await admin.auth().verifyIdToken(getBearerToken(request));
     return decodedToken.uid;
+}
+
+
+function getStartOfDay(timestamp) {
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome').startOf('day'); // Start of the day in local time
+    return date.toMillis(); // Return timestamp in milliseconds
+}
+
+function getEndOfDay(timestamp) {
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome').endOf('day');
+    return date.toMillis();
+}
+
+function getStartOfMonth(timestamp){
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome').startOf('month');
+    return date.toMillis();
+}
+
+function getEndOfMonth(timestamp){
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome').endOf('month');
+    return date.toMillis();
+}
+
+function getHourFromTimestamp(timestamp) {
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome');
+    return date.hour;
+}
+
+function getLocalTimeZone() {
+    return DateTime.local().setZone('Europe/Rome').zoneName;
 }
 
 
@@ -417,55 +710,99 @@ exports.deleteAlert = cloudFunctions.https.onRequest(async (request, response) =
     return response.send(await deleteCustomAlert(sensorId, type));
 })
 
+exports.getSensorsData = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.query.sensorId;
+    const fromDate = new Date(request.query.fromDate);
+    const toDate = new Date(request.query.toDate);
+    const type = request.query.type;
+    var result = [];
+    switch(type){
+        case 'hour':
+            result = await getSensorsDataByTime(sensorId, fromDate, toDate);
+            break;
+        case 'day':
+            result = await getSensorsLogDataByDay(sensorId, fromDate, toDate);
+            break;
+        case 'month':
+            result = await getSensorsMonthsLogsData(sensorId, fromDate, toDate);
+            break;
+        default:
+            result = await getSensorsDataByTime(sensorId, fromDate, toDate);
+            break;
+    }
+    return response.send({'result': result});
+})
+
+exports.getSensorsRecentData = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.query.sensorId;
+    const type = request.query.type;
+    const duration = request.query.duration;
+    var result = []
+    switch(type){
+        case 'hour':
+            result = await getSensorsLastFewHoursData(sensorId, duration);
+            break;
+        case 'day':
+            result = await getSensorsLastFewDaysLogData(sensorId, duration);
+            break;
+        case 'month':
+            result = await getSensorsLastMonthsLogs(sensorId, duration);
+            break;
+        default:
+            result = await getSensorsLastFewHoursData(sensorId, duration);
+            break;
+    }
+
+    return response.send({'result': result});
+
+
+})
 
 /**
  * MQTT broker code
  */
 
-// mqttClient.on('connect', () => {
-//     console.log('MQTT client connected');
-//     mqttClient.subscribe(mqttTopic, (err) => {
-//         if (err) {
-//             console.error('Failed to subscribe to topic:', mqttTopic, err);
-//         } else {
-//             console.log('Subscribed to topic:', mqttTopic);
-//         }
-//     });
-// });
+mqttClient.on('connect', () => {
+    console.log('MQTT client connected');
+    mqttClient.subscribe(mqttTopic, (err) => {
+        if (err) {
+            console.error('Failed to subscribe to topic:', mqttTopic, err);
+        } else {
+            console.log('Subscribed to topic:', mqttTopic);
+        }
+    });
+});
 
-// mqttClient.on('message', async (topic, message) => {
-//     console.log('Received message:', topic, message.toString());
+mqttClient.on('message', async (topic, message) => {
+    console.log('Received message:', topic, message.toString());
 
-//     const data = JSON.parse(message);
-//     try {
-//         const finalData = {
-//             sensorId: 'sensorId' + data.sensorId,
-//             recordedDate: data.recordedDate,
-//             currentUsage: data.currentUsage,
-//             createdAt: Firestore.FieldValue.serverTimestamp()
-//         }
-//         await admin.firestore().collection('logs').add(finalData);
-//         console.log(`Sensor data saved with sensorId: ${data.sensorId}`);
-//     } catch (error) {
-//         console.error('Error checking sensor:',data.sensorId, error);
-//     }
-// });
+    const data = JSON.parse(message);
+    try {
 
-// mqttClient.on('error', (error) => {
-//     console.error('MQTT client error:', error);
-// });
+        const sensorData = await admin.firestore().collection('logs').add({...data});
+        
+        // await admin.firestore().collection('logs').doc(`${getStartOfDay(data.recordedDate)}`).add(finalData);
+        console.log(`Sensor data saved with sensorId: ${data.sensorId}`);
+    } catch (error) {
+        console.error('Error checking sensor:',data.sensorId, error);
+    }
+});
 
-// mqttClient.on('close', () => {
-//     console.log('MQTT client connection closed');
-// });
+mqttClient.on('error', (error) => {
+    console.error('MQTT client error:', error);
+});
 
-// mqttClient.on('reconnect', () => {
-//     console.log('MQTT client reconnecting');
-// });
+mqttClient.on('close', () => {
+    console.log('MQTT client connection closed');
+});
 
-// mqttClient.on('offline', () => {
-//     console.log('MQTT client offline');
-// });
+mqttClient.on('reconnect', () => {
+    console.log('MQTT client reconnecting');
+});
+
+mqttClient.on('offline', () => {
+    console.log('MQTT client offline');
+});
 
 
 

@@ -23,6 +23,7 @@ var options = {
 const mqttClient = mqtt.connect(options);
 admin.initializeApp();
 const cloudFunctions = functions.region('europe-west1');
+const secondsInADay =  60 * 60 * 24;
 
 
 class ResponseError{
@@ -41,6 +42,27 @@ const durationType = {
 
 function checkDuration(value){
     return Object.values(durationType).includes(value);
+}
+
+function calculateAverageUsageInLifetime(creationDate, lastUpdateDate, currentUsage){
+    var lifetimeInDays = (lastUpdateDate - creationDate)/secondsInADay;
+    console.log(lifetimeInDays);
+    console.log(lastUpdateDate - creationDate);
+    const result = {};
+
+    if(lifetimeInDays < 1)
+        return result;
+    result["averageDailyUsage"] = currentUsage/(lifetimeInDays);
+
+    if(lifetimeInDays < 7)
+        return result;
+    result["averageWeeklyUsage"] = currentUsage/(lifetimeInDays/7);
+
+    if(lifetimeInDays < 30)
+        return result;
+    result["averageMonthlyUsage"] = currentUsage/(lifetimeInDays/30);
+
+    return result;
 }
 
 
@@ -81,22 +103,30 @@ async function getSensorList() {
 async function getCustomersDeviceData(customerId) {
     const data = await admin.firestore().collection('sensors').where(`deviceRelations.${customerId}`, '!=', null).get();
     const result = {"sensors":[]};
+
     if (data){
         data.forEach((sensorDoc) => {
             const sensorData = sensorDoc.data();
-            const { currentUsage, sensorId } = sensorData;
-            const { name, createdAt } = sensorData.deviceRelations[customerId];
+            const { currentUsage, sensorId, location, createdAt, updatedAt } = sensorData;
+            const deviceRelation = sensorData.deviceRelations[customerId];
             const customAlerts = sensorData.customAlerts || [];
             const customAlertsResult = [];
             for (const [type, alertObj] of Object.entries(customAlerts)) {
                 customAlertsResult.push({ type: type, value: alertObj.value });
             }
+            const { averageDailyUsage, averageWeeklyUsage, averageMonthlyUsage } = calculateAverageUsageInLifetime(createdAt, updatedAt, currentUsage); 
             const objData = {
-                'name' : name,
-                'createdAt': new Date(createdAt._nanoseconds),
+                'name' : deviceRelation.name,
+                'createdAt': new Date(deviceRelation.createdAt._nanoseconds),
                 'currentUsage': currentUsage,
                 'sensorId': sensorId,
-                'customAlerts': customAlertsResult
+                'customAlerts': customAlertsResult,
+                'location': location,
+                'sensorCreateAt': new Date(createdAt._nanoseconds),
+                'lastUpdateAt': new Date(updatedAt._nanoseconds),
+                'averageDailyUsage' : averageDailyUsage?.toFixed(2) ?? 0,
+                'averageWeeklyUsage' : averageWeeklyUsage?.toFixed(2) ?? 0,
+                'averageMonthlyUsage': averageMonthlyUsage?.toFixed(2) ?? 0,
             };
             result["sensors"].push(objData);
         });

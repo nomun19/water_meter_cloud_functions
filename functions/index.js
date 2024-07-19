@@ -6,6 +6,7 @@ const Jimp = require('jimp');
 const QrCode = require('qrcode-reader');
 const { error } = require('firebase-functions/logger');
 const { Firestore } = require("firebase-admin/firestore");
+const geofire = require('geofire-common');
 
 const mqttTopic = 'data';
 var options = {
@@ -257,6 +258,34 @@ async function deleteCustomAlert(sensorId, type){
     });
 }
 
+async function getSensorsNearAPoint(point, radiusInKm)
+{
+    console.log(point);
+    console.log(radiusInKm);
+    //Calculate bounding box values
+    let dY = radiusInKm / 111.11;
+    let dX = dY / Math.cos(geofire.degreesToRadians(point.lat));
+
+    const results = await admin.firestore().collection('sensors')
+        .orderBy("location.longitude")
+        .where("location.latitude", ">=", point.lat - dY)
+        .where("location.latitude", "<=", point.lat + dY)
+        .where("location.longitude", ">=", point.lon - dX)
+        .where("location.longitude", "<=", point.lon + dX).get();
+
+    var dataList = {"sensors":[]};
+    results.forEach(doc => {
+        const data = doc.data();
+        console.log(data);
+        let distance = geofire.distanceBetween([data.location.latitude, data.location.longitude], [point.lat, point.lon]);
+        if(distance <= radiusInKm){
+            dataList["sensors"].push(doc.data());
+        }
+    });
+
+    return dataList;
+}
+
 
 /**
  * Other useful functions
@@ -300,6 +329,19 @@ async function getCustomerId(request) {
 /**
  * Endpoints
  */
+
+exports.getSensorsNearMe = cloudFunctions.https.onRequest(async (request, response) => {
+    try {
+        const location = request.body.location;
+        const radius = request.body.radius;
+        const result = await getSensorsNearAPoint(location, radius);
+        response.send(result);
+    } catch (error) {
+        console.error(error);
+        response.status(500).send('Failed to retrieving sensors near position');
+    }
+});
+
 
 exports.getUsers = cloudFunctions.https.onRequest(async (request, response) => {
     try {

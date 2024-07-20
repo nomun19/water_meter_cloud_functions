@@ -114,8 +114,8 @@ async function getCustomersDeviceData(customerId) {
     const data = await admin.firestore().collection('sensors').where(`deviceRelations.${customerId}`, '!=', null).get();
     const result = {"sensors":[]};
 
-    if (data){
-        data.forEach((sensorDoc) => {
+    if (data) {
+        for (const sensorDoc of data.docs) {
             const sensorData = sensorDoc.data();
             const { currentUsage, sensorId, location, createdAt, updatedAt } = sensorData;
             const deviceRelation = sensorData.deviceRelations[customerId];
@@ -125,8 +125,9 @@ async function getCustomersDeviceData(customerId) {
                 customAlertsResult.push({ type: type, value: alertObj.value });
             }
             const { averageDailyUsage, averageWeeklyUsage, averageMonthlyUsage } = calculateAverageUsageInLifetime(createdAt, updatedAt, currentUsage);
+            const currentDayUsage = await getCurrentDayUsage(sensorId, currentUsage);
             const objData = {
-                'name' : deviceRelation.name,
+                'name': deviceRelation.name,
                 'createdAt': new Date(deviceRelation.createdAt._nanoseconds),
                 'currentUsage': currentUsage,
                 'sensorId': sensorId,
@@ -134,16 +135,54 @@ async function getCustomersDeviceData(customerId) {
                 'location': location,
                 'sensorCreatedAt': new Date(createdAt._nanoseconds),
                 'updatedAt': new Date(updatedAt._nanoseconds),
-                'averageDailyUsage' : averageDailyUsage?.toFixed(2) ?? 0,
-                'averageWeeklyUsage' : averageWeeklyUsage?.toFixed(2) ?? 0,
-                'averageMonthlyUsage': averageMonthlyUsage?.toFixed(2) ?? 0,
+                'averageDailyUsage': averageDailyUsage?.toFixed(2) ?? '0',
+                'averageWeeklyUsage': averageWeeklyUsage?.toFixed(2) ?? '0',
+                'averageMonthlyUsage': averageMonthlyUsage?.toFixed(2) ?? '0',
+                'currentDayUsage': currentDayUsage,
             };
             result["sensors"].push(objData);
-        });
+        }
     } else {
         console.log('not exist');
     }
     return result;
+}
+
+async function getCurrentDayUsage(sensorId, currentUsage) {
+    var toDate = getStartOfDay(new Date().getTime());
+    return getCurrentUsage(sensorId, currentUsage, toDate);
+}
+
+async function getCurrentUsage(sensorId, currentUsage, toDate){
+    const sensorDocRef = await admin.firestore().collection('logs')
+        .where('sensorId', '==', sensorId)
+        .where('recordedDate', '<', toDate)
+        .orderBy('recordedDate', 'desc')
+        .limit(1)
+        .get();
+
+    if (!sensorDocRef.empty) {
+        let currentDayUsage;
+        sensorDocRef.forEach(doc => {
+            const res = doc.data();
+            console.log(res.currentUsage);
+            currentDayUsage = currentUsage - res.currentUsage;
+        });
+        return currentDayUsage.toFixed(2).toString();
+    }
+    return currentUsage;
+}
+
+function getFirstDayOfMonth(date) {
+    return new Date(date.getFullYear(), date.getMonth(), 1)
+}
+
+async function getCurrentMonthUsage(sensorId) {
+    var toDate = getStartOfDay(getFirstDayOfMonth(new Date()).getTime());
+    const sensor = await getSensorData(sensorId);
+    console.log(sensor.currentUsage);
+    if (sensor == null) return new ResponseError('not found the sensor information');
+    return getCurrentUsage(sensorId, sensor.currentUsage, toDate);
 }
 
 async function deleteCustomersDevice(sensorId, customerId) {
@@ -356,16 +395,16 @@ function getFormattedDatePart(timestamp, type) {
 
     switch (type) {
         case 'hour':
-            result = dateTime.hour; // returns hour (0-23)
+            result = dateTime.hour;
             break;
         case 'day':
-            result = dateTime.day; // returns day of the month (1-31)
+            result = dateTime.day;
             break;
         case 'month':
-            result = dateTime.month; // returns month (1-12)
+            result = dateTime.month;
             break;
         case 'year':
-            result = dateTime.year; // returns year
+            result = dateTime.year;
             break;
         default:
             throw new Error('Invalid type: ' + type);
@@ -443,7 +482,6 @@ async function getSensorsLastFewDaysLogData(sensorId, lastFewDays){
 }
 
 async function getSensorsMonthsLogsData(sensorId, fromDate, endDate){
-    console.log(fromDate);
     fromDate = getStartOfMonth(fromDate.getTime());
     endDate = getEndOfMonth(endDate.getTime());
     console.log(fromDate);
@@ -468,117 +506,8 @@ async function getSensorsLastMonthsLogs(sensorId, lastFewMonths){
     var endDate = new Date();
     var fromDate = new Date(new Date().setMonth(endDate.getMonth() - lastFewMonths))
     return getSensorsMonthsLogsData(sensorId, fromDate, endDate);
-
 }
 
-async function getSensorsLogData(sensorId) {
-    const nowDate = getStartOfDay(new Date().getTime());
-    console.log(nowDate);
-    var hour = 18;
-    var endTime = new Date();
-    var startTime = new Date();
-
-    for (let i = 1; i <= 3; i++) {
-        const startTime = new Date(endTime);
-        startTime.setHours(endTime.getHours() - 6);
-
-        const sensorDocRef = await admin.firestore().collection('logs')
-            .where('sensorId', '==', 'sensorId1')
-            .where('recordedDate', '>=', startTime.getTime())
-            .where('recordedDate', '<=', endTime.getTime())
-            .orderBy('recordedDate', 'desc')
-            .limit(1)
-            .get();
-
-        if (!sensorDocRef.empty) {
-            console.log(sensorDocRef.data());
-            // sensorDocRef.forEach(doc => {
-            // console.log(doc.data());
-            // });
-        } else {
-            console.log('No data found for period:', startTime, 'to', endTime);
-        }
-
-        // Update endTime for the next iteration
-        endTime.setHours(endTime.getHours() - 6);
-    }
-}
-
-function groupByHour(data) {
-    const hourlyData = {};
-
-    data.forEach(item => {
-        const date = new Date(item.recordedDate);
-        const hourKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')} ${String(date.getUTCHours()).padStart(2, '0')}:00`;
-
-        if (!hourlyData[hourKey]) {
-            hourlyData[hourKey] = [];
-        }
-
-        hourlyData[hourKey].push(item.usage);
-    });
-
-    return aggregateData(hourlyData);
-}
-
-function groupByDay(data) {
-    const dailyData = {};
-
-    data.forEach(item => {
-        const date = new Date(item.recordedDate);
-        const dayKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
-
-        if (!dailyData[dayKey]) {
-            dailyData[dayKey] = [];
-        }
-
-        dailyData[dayKey].push(item.usage);
-    });
-
-    return aggregateData(dailyData);
-}
-
-function groupByWeek(data) {
-    const weeklyData = {};
-
-    data.forEach(item => {
-        const date = new Date(item.recordedDate);
-        const weekKey = `${date.getUTCFullYear()}-W${String(getWeekNumber(date)).padStart(2, '0')}`;
-
-        if (!weeklyData[weekKey]) {
-            weeklyData[weekKey] = [];
-        }
-
-        weeklyData[weekKey].push(item.usage);
-    });
-
-    return aggregateData(weeklyData);
-}
-
-function getWeekNumber(date) {
-    const start = new Date(date.getUTCFullYear(), 0, 1);
-    const diff = (date - start + (start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000) / 86400000;
-    return Math.floor((diff + start.getUTCDay() + 1) / 7);
-}
-
-function aggregateData(groupedData) {
-    const aggregatedData = [];
-
-    for (const key in groupedData) {
-        const values = groupedData[key];
-        const maxUsage = Math.max(...values);
-        aggregatedData.push({ period: key, usage: maxUsage });
-    }
-
-    return aggregatedData;
-}
-
-function formatData(data) {
-    return data.map(item => ({
-        period: item.period,
-        usage: item.usage
-    }));
-}
 
 /**
  * Other useful functions
@@ -826,8 +755,11 @@ exports.getSensorsRecentData = cloudFunctions.https.onRequest(async (request, re
     }
 
     return response.send({'result': result});
+})
 
-
+exports.getSensorsMonthlyUsage = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.query.sensorId;
+    response.send(await getCurrentMonthUsage(sensorId));
 })
 
 /**

@@ -173,6 +173,28 @@ async function getCurrentUsage(sensorId, currentUsage, toDate){
     return currentUsage;
 }
 
+async function getCountOfSensors(){
+    let count = (await admin.firestore().collection('sensors').count().get()).data();
+    return count;
+}
+
+async function getSensorListPage(lastCreatedAt, size) {
+    let query = admin.firestore().collection('sensors')
+        .orderBy('createdAt', 'asc')
+        .limit(parseInt(size));
+
+    if (lastCreatedAt) {
+        query = query.where('createdAt', '>', lastCreatedAt);
+    }
+
+    const sensorDocRef = await query.get();
+
+    if (!sensorDocRef.empty) {
+        return sensorDocRef.docs.map(doc => doc.data());
+    }
+    return [];
+}
+
 function getFirstDayOfMonth(date) {
     return new Date(date.getFullYear(), date.getMonth(), 1)
 }
@@ -759,7 +781,16 @@ exports.getSensorsRecentData = cloudFunctions.https.onRequest(async (request, re
 
 exports.getSensorsMonthlyUsage = cloudFunctions.https.onRequest(async (request, response) => {
     const sensorId = request.query.sensorId;
-    response.send(await getCurrentMonthUsage(sensorId));
+    const result = await getCurrentMonthUsage(sensorId);
+    response.send({'result': result});
+})
+
+exports.getSensorListWithPagination = cloudFunctions.https.onRequest(async (request, response) => {
+    let lastCreatedAt = request.query.lastCreatedAt || null;
+    const size = parseInt(request.query.size) || 20;
+    const result = await getSensorListPage(lastCreatedAt, size);
+    const { count } = await getCountOfSensors();
+    response.send({'result': result, 'totalSize': count});
 })
 
 /**

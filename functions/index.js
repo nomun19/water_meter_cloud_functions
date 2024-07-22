@@ -178,14 +178,13 @@ async function getCountOfSensors(){
     return count;
 }
 
-async function getSensorListPage(lastCreatedAt, size) {
+async function getSensorListPage(size, page) {
+    if (page > 0)
+        page = page-1;
     let query = admin.firestore().collection('sensors')
         .orderBy('createdAt', 'asc')
+        .offset(parseInt(page * size))
         .limit(parseInt(size));
-
-    if (lastCreatedAt) {
-        query = query.where('createdAt', '>', lastCreatedAt);
-    }
 
     const sensorDocRef = await query.get();
 
@@ -756,6 +755,29 @@ exports.getSensorsData = cloudFunctions.https.onRequest(async (request, response
     return response.send({'result': result});
 })
 
+exports.getSensorsDataWeb = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.body.sensorId;
+    const fromDate = new Date(request.body.fromDate);
+    const toDate = new Date(request.body.toDate);
+    const type = request.body.type;
+    var result = [];
+    switch(type){
+        case 'hour':
+            result = await getSensorsDataByTime(sensorId, fromDate, toDate);
+            break;
+        case 'day':
+            result = await getSensorsLogDataByDay(sensorId, fromDate, toDate);
+            break;
+        case 'month':
+            result = await getSensorsMonthsLogsData(sensorId, fromDate, toDate);
+            break;
+        default:
+            result = await getSensorsDataByTime(sensorId, fromDate, toDate);
+            break;
+    }
+    return response.send({'result': result});
+})
+
 exports.getSensorsRecentData = cloudFunctions.https.onRequest(async (request, response) => {
     const sensorId = request.query.sensorId;
     const type = request.query.type;
@@ -786,11 +808,11 @@ exports.getSensorsMonthlyUsage = cloudFunctions.https.onRequest(async (request, 
 })
 
 exports.getSensorListWithPagination = cloudFunctions.https.onRequest(async (request, response) => {
-    let lastCreatedAt = request.query.lastCreatedAt || null;
-    const size = parseInt(request.query.size) || 20;
-    const result = await getSensorListPage(lastCreatedAt, size);
+    const page = request.body.page || 0;
+    const size = parseInt(request.body.size) || 20;
+    const result = await getSensorListPage(size, page);
     const { count } = await getCountOfSensors();
-    response.send({'result': result, 'totalSize': count});
+    response.send({'result': result, 'totalSize': count, 'page': page, 'size':size});
 })
 
 /**

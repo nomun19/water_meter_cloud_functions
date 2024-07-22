@@ -65,6 +65,38 @@ function calculateAverageUsageInLifetime(creationDate, lastUpdateDate, currentUs
     return result;
 }
 
+function parseSensorData(sensorData, customerId = null, isSuperUser = false){
+    console.log(sensorData);
+    const { currentUsage, sensorId, location, createdAt, updatedAt } = sensorData;
+    const customAlerts = sensorData.customAlerts || [];
+    const customAlertsResult = [];
+    for (const [type, alertObj] of Object.entries(customAlerts)) {
+        customAlertsResult.push({ type: type, value: alertObj.value });
+    }
+    const { averageDailyUsage, averageWeeklyUsage, averageMonthlyUsage } = calculateAverageUsageInLifetime(createdAt, updatedAt, currentUsage); 
+    let generalData = {
+        'currentUsage': currentUsage,
+        'sensorId': sensorId,
+        'customAlerts': customAlertsResult,
+        'location': location,
+        'sensorCreatedAt': createdAt.toDate(),
+        'updatedAt': updatedAt.toDate(),
+        'averageDailyUsage' : averageDailyUsage?.toFixed(2) ?? 0,
+        'averageWeeklyUsage' : averageWeeklyUsage?.toFixed(2) ?? 0,
+        'averageMonthlyUsage': averageMonthlyUsage?.toFixed(2) ?? 0,
+    };
+
+    if(isSuperUser)
+        return generalData;
+
+    const deviceRelation = sensorData.deviceRelations[customerId];
+    return {
+        ...generalData,
+        "name" : deviceRelation.name,
+        "createdAt" : deviceRelation.createdAt
+    };
+}
+
 
 /**
  * interact with firestore
@@ -107,28 +139,7 @@ async function getCustomersDeviceData(customerId) {
     if (data){
         data.forEach((sensorDoc) => {
             const sensorData = sensorDoc.data();
-            const { currentUsage, sensorId, location, createdAt, updatedAt } = sensorData;
-            const deviceRelation = sensorData.deviceRelations[customerId];
-            const customAlerts = sensorData.customAlerts || [];
-            const customAlertsResult = [];
-            for (const [type, alertObj] of Object.entries(customAlerts)) {
-                customAlertsResult.push({ type: type, value: alertObj.value });
-            }
-            const { averageDailyUsage, averageWeeklyUsage, averageMonthlyUsage } = calculateAverageUsageInLifetime(createdAt, updatedAt, currentUsage); 
-            const objData = {
-                'name' : deviceRelation.name,
-                'createdAt': new Date(deviceRelation.createdAt._nanoseconds),
-                'currentUsage': currentUsage,
-                'sensorId': sensorId,
-                'customAlerts': customAlertsResult,
-                'location': location,
-                'sensorCreatedAt': new Date(createdAt._nanoseconds),
-                'updatedAt': new Date(updatedAt._nanoseconds),
-                'averageDailyUsage' : averageDailyUsage?.toFixed(2) ?? 0,
-                'averageWeeklyUsage' : averageWeeklyUsage?.toFixed(2) ?? 0,
-                'averageMonthlyUsage': averageMonthlyUsage?.toFixed(2) ?? 0,
-            };
-            result["sensors"].push(objData);
+            result["sensors"].push(parseSensorData(sensorData,customerId,false));
         });
     } else {
         console.log('not exist');
@@ -359,6 +370,17 @@ async function getCustomerId(request) {
 /**
  * Endpoints
  */
+
+exports.getSensorInfo = cloudFunctions.https.onRequest(async (request, response) => {
+    try {
+        const sensor = request.body.sensorId;
+        response.send(parseSensorData(await getSensorData(sensor), undefined, true));
+    } catch (error) {
+        console.error(error);
+        response.status(500).send('Failed to retrieving sensor data');
+    }
+});
+
 
 exports.getSensorsNearMe = cloudFunctions.https.onRequest(async (request, response) => {
     try {

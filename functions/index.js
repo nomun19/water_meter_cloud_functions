@@ -77,7 +77,7 @@ function calculateAverageUsageInLifetime(creationDate, lastUpdateDate, currentUs
 
 function parseSensorData(sensorData, customerId = null, isSuperUser = false){
     console.log(sensorData);
-    const { currentUsage, sensorId, location, createdAt, updatedAt } = sensorData;
+    const { currentUsage, sensorId, location, createdAt, updatedAt, currentMonthUsage, currentDayUsage, currentWeekUsage, currentYearUsage } = sensorData;
     const customAlerts = sensorData.customAlerts || [];
     const customAlertsResult = [];
     for (const [type, alertObj] of Object.entries(customAlerts)) {
@@ -94,6 +94,10 @@ function parseSensorData(sensorData, customerId = null, isSuperUser = false){
         'averageDailyUsage' : averageDailyUsage?.toFixed(2) ?? 0,
         'averageWeeklyUsage' : averageWeeklyUsage?.toFixed(2) ?? 0,
         'averageMonthlyUsage': averageMonthlyUsage?.toFixed(2) ?? 0,
+        'currentDayUsage' : currentDayUsage?.toFixed(2) ?? 0,
+        'currentMonthUsage': currentMonthUsage?.toFixed(2) ?? 0,
+        'currentWeekUsage' : currentWeekUsage?.toFixed(2) ?? 0,
+        'currentYearUsage' : currentYearUsage?.toFixed(2) ?? currentUsage,
     };
 
     if(isSuperUser)
@@ -480,13 +484,37 @@ async function getSensorsLastFewHoursData(sensorId, lastHours){
     for (i=1; i<=lastHours; i++){
         var data = await getSensorsDataByTime(sensorId, fromDate, endDate.getTime(), 'hour');
         if (data == null){
-            data = [new ChartData(getFormattedDatePart(fromDate, 'hour'), 0)];
+            data = [new ChartData(getFormattedDatePart(fromDate.getTime, 'hour'), 0)];
         }
         result = [...result, ...data];
         fromDate = new Date(fromDate).setHours(new Date(fromDate).getHours() + 1);
     }
     return result;
 }
+
+async function getSensorsLogDataByTime(sensorId, fromDate, toDate) {
+    fromDate = clearMinutes(new Date(fromDate));
+    toDate = clearMinutes(new Date(toDate));
+    const hourDiff = Math.ceil((toDate.getTime() - fromDate.getTime()) / (1000 * 60 * 60));
+    let result = [];
+
+    for (let i = 0; i < hourDiff; i++) {
+        const nextDate = new Date(fromDate.getTime());
+        nextDate.setHours(fromDate.getHours() + 1);
+
+        const data = await getSensorsDataByTime(sensorId, fromDate.getTime(), nextDate.getTime(), 'hour');
+        
+        if (data === null) {
+            result.push(new ChartData(getFormattedDatePart(fromDate.getTime(), 'hour'), 0));
+        } else {
+            result = result.concat(data);
+        }
+        fromDate = nextDate;
+    }
+
+    return result;
+}
+
 
 async function getSensorsLogDataByDay(sensorId, fromDate, endDate){
     fromDate = getStartOfDay(fromDate.getTime());
@@ -760,7 +788,7 @@ exports.getSensorsData = cloudFunctions.https.onRequest(async (request, response
     var result = [];
     switch(type){
         case 'hour':
-            result = await getSensorsDataByTime(sensorId, fromDate, toDate);
+            result = await getSensorsLogDataByTime(sensorId, fromDate, toDate);
             break;
         case 'day':
             result = await getSensorsLogDataByDay(sensorId, fromDate, toDate);
@@ -769,7 +797,7 @@ exports.getSensorsData = cloudFunctions.https.onRequest(async (request, response
             result = await getSensorsMonthsLogsData(sensorId, fromDate, toDate);
             break;
         default:
-            result = await getSensorsDataByTime(sensorId, fromDate, toDate);
+            result = await getSensorsLogDataByTime(sensorId, fromDate, toDate);
             break;
     }
     return response.send({'result': result});
@@ -783,7 +811,7 @@ exports.getSensorsDataWeb = cloudFunctions.https.onRequest(async (request, respo
     var result = [];
     switch(type){
         case 'hour':
-            result = await getSensorsDataByTime(sensorId, fromDate, toDate);
+            result = await getSensorsLogDataByTime(sensorId, fromDate, toDate);
             break;
         case 'day':
             result = await getSensorsLogDataByDay(sensorId, fromDate, toDate);
@@ -792,7 +820,7 @@ exports.getSensorsDataWeb = cloudFunctions.https.onRequest(async (request, respo
             result = await getSensorsMonthsLogsData(sensorId, fromDate, toDate);
             break;
         default:
-            result = await getSensorsDataByTime(sensorId, fromDate, toDate);
+            result = await getSensorsLogDataByTime(sensorId, fromDate, toDate);
             break;
     }
     return response.send({'result': result});

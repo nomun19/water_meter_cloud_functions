@@ -389,10 +389,22 @@ async function getSensorsNearAPoint(point, radiusInKm)
     var dataList = {"sensors":[]};
     results.forEach(doc => {
         const data = doc.data();
-        console.log(data);
+        console.log(data);       
         let distance = geofire.distanceBetween([data.location.latitude, data.location.longitude], [point.lat, point.lon]);
         if(distance <= radiusInKm){
-            dataList["sensors"].push(doc.data());
+            const { currentUsage, sensorId, location, createdAt, updatedAt} = data;
+            const { averageDailyUsage, averageWeeklyUsage, averageMonthlyUsage } = calculateAverageUsageInLifetime(createdAt, updatedAt, currentUsage);
+            const generalData = {
+                'currentUsage': currentUsage,
+                'sensorId': sensorId,
+                'location': location,
+                'sensorCreatedAt': createdAt.toDate(),
+                'updatedAt': updatedAt.toDate(),
+                'averageDailyUsage': parseFloat(averageDailyUsage?.toFixed(3)) ?? 0,
+                'averageWeeklyUsage': parseFloat(averageWeeklyUsage?.toFixed(3)) ?? 0,
+                'averageMonthlyUsage': parseFloat(averageMonthlyUsage?.toFixed(3)) ?? 0
+            };
+            dataList["sensors"].push(generalData);
         }
     });
 

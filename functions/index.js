@@ -867,47 +867,47 @@ exports.getSensorListWithPagination = cloudFunctions.https.onRequest(async (requ
  * MQTT broker code
  */
 
-mqttClient.on('connect', () => {
-    console.log('MQTT client connected');
-    mqttClient.subscribe(mqttTopic, (err) => {
-        if (err) {
-            console.error('Failed to subscribe to topic:', mqttTopic, err);
-        } else {
-            console.log('Subscribed to topic:', mqttTopic);
-        }
-    });
-});
+// mqttClient.on('connect', () => {
+//     console.log('MQTT client connected');
+//     mqttClient.subscribe(mqttTopic, (err) => {
+//         if (err) {
+//             console.error('Failed to subscribe to topic:', mqttTopic, err);
+//         } else {
+//             console.log('Subscribed to topic:', mqttTopic);
+//         }
+//     });
+// });
 
-mqttClient.on('message', async (topic, message) => {
-    console.log('Received message:', topic, message.toString());
+// mqttClient.on('message', async (topic, message) => {
+//     console.log('Received message:', topic, message.toString());
 
-    const data = JSON.parse(message);
-    try {
+//     const data = JSON.parse(message);
+//     try {
 
-        const sensorData = await admin.firestore().collection('logs').add({...data});
+//         const sensorData = await admin.firestore().collection('logs').add({...data});
 
-        // await admin.firestore().collection('logs').doc(`${getStartOfDay(data.recordedDate)}`).add(finalData);
-        console.log(`Sensor data saved with sensorId: ${data.sensorId}`);
-    } catch (error) {
-        console.error('Error checking sensor:',data.sensorId, error);
-    }
-});
+//         // await admin.firestore().collection('logs').doc(`${getStartOfDay(data.recordedDate)}`).add(finalData);
+//         console.log(`Sensor data saved with sensorId: ${data.sensorId}`);
+//     } catch (error) {
+//         console.error('Error checking sensor:',data.sensorId, error);
+//     }
+// });
 
-mqttClient.on('error', (error) => {
-    console.error('MQTT client error:', error);
-});
+// mqttClient.on('error', (error) => {
+//     console.error('MQTT client error:', error);
+// });
 
-mqttClient.on('close', () => {
-    console.log('MQTT client connection closed');
-});
+// mqttClient.on('close', () => {
+//     console.log('MQTT client connection closed');
+// });
 
-mqttClient.on('reconnect', () => {
-    console.log('MQTT client reconnecting');
-});
+// mqttClient.on('reconnect', () => {
+//     console.log('MQTT client reconnecting');
+// });
 
-mqttClient.on('offline', () => {
-    console.log('MQTT client offline');
-});
+// mqttClient.on('offline', () => {
+//     console.log('MQTT client offline');
+// });
 
 
 

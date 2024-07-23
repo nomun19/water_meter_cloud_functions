@@ -91,13 +91,13 @@ function parseSensorData(sensorData, customerId = null, isSuperUser = false){
         'location': location,
         'sensorCreatedAt': createdAt.toDate(),
         'updatedAt': updatedAt.toDate(),
-        'averageDailyUsage' : averageDailyUsage?.toFixed(2) ?? 0,
-        'averageWeeklyUsage' : averageWeeklyUsage?.toFixed(2) ?? 0,
-        'averageMonthlyUsage': averageMonthlyUsage?.toFixed(2) ?? 0,
-        'currentDayUsage' : currentDayUsage?.toFixed(2) ?? 0,
-        'currentMonthUsage': currentMonthUsage?.toFixed(2) ?? 0,
-        'currentWeekUsage' : currentWeekUsage?.toFixed(2) ?? 0,
-        'currentYearUsage' : currentYearUsage?.toFixed(2) ?? currentUsage,
+        'averageDailyUsage': parseFloat(averageDailyUsage?.toFixed(3)) ?? 0,
+        'averageWeeklyUsage': parseFloat(averageWeeklyUsage?.toFixed(3)) ?? 0,
+        'averageMonthlyUsage': parseFloat(averageMonthlyUsage?.toFixed(3)) ?? 0,
+        'currentDayUsage' : parseFloat(currentDayUsage?.toFixed(3)) ?? 0,
+        'currentMonthUsage': parseFloat(currentMonthUsage?.toFixed(3)) ?? 0,
+        'currentWeekUsage' : parseFloat(currentWeekUsage?.toFixed(3)) ?? 0,
+        'currentYearUsage' : parseFloat(currentYearUsage?.toFixed(3)) ?? currentUsage,
     };
 
     if(isSuperUser)
@@ -107,7 +107,7 @@ function parseSensorData(sensorData, customerId = null, isSuperUser = false){
     return {
         ...generalData,
         "name" : deviceRelation.name,
-        "createdAt" : deviceRelation.createdAt
+        "createdAt" : deviceRelation.createdAt.toDate()
     };
 }
 

@@ -460,19 +460,29 @@ function getFormattedDatePart(timestamp, type) {
 }
 
 async function getSensorsDataByTime(sensorId, fromDate, toDate, type){
-    const sensorDocRef = await admin.firestore().collection('logs')
-        .where('sensorId', '==', sensorId)
-        .where('recordedDate', '>=', fromDate)
-        .where('recordedDate', '<=', toDate)
-        .orderBy('recordedDate', 'desc')
-        .limit(1)
-        .get();
+    console.log(new Date(toDate));
+    let sensorDocRef;
+    if(fromDate == null)
+        sensorDocRef = await admin.firestore().collection('logs')
+            .where('sensorId', '==', sensorId)
+            .where('recordedDate', '<', toDate)
+            .orderBy('recordedDate', 'desc')
+            .limit(1)
+            .get();
+    else
+        sensorDocRef = await admin.firestore().collection('logs')
+            .where('sensorId', '==', sensorId)
+            .where('recordedDate', '>=', fromDate)
+            .where('recordedDate', '<=', toDate)
+            .orderBy('recordedDate', 'desc')
+            .limit(1)
+            .get();
 
     const result = [];
     if (!sensorDocRef.empty) {
         sensorDocRef.forEach(doc => {
             var res = doc.data();
-        result.push(new ChartData(getFormattedDatePart(res.recordedDate, type),res.currentUsage));
+            result.push(new ChartData(getFormattedDatePart(res.recordedDate, type),res.currentUsage));
         });
     } else {
         console.log('No data found for period:', fromDate, 'to', toDate);
@@ -510,6 +520,8 @@ async function getSensorsLogDataByTime(sensorId, fromDate, toDate) {
     const hourDiff = Math.ceil((toDate.getTime() - fromDate.getTime()) / (1000 * 60 * 60));
     let result = [];
 
+    const startingData = await getSensorsDataByTime(sensorId, null, fromDate.getTime(), 'hour');
+    let startingUsage = startingData?.usage ?? 0;
     for (let i = 0; i < hourDiff; i++) {
         const nextDate = new Date(fromDate.getTime());
         nextDate.setHours(fromDate.getHours() + 1);
@@ -519,7 +531,8 @@ async function getSensorsLogDataByTime(sensorId, fromDate, toDate) {
         if (data === null) {
             result.push(new ChartData(getFormattedDatePart(fromDate.getTime(), 'hour'), 0));
         } else {
-            result = result.concat(data);
+            result.push(new ChartData(getFormattedDatePart(fromDate.getTime(), 'hour'), data[0].usage - startingUsage));
+            startingUsage = data[0].usage;
         }
         fromDate = nextDate;
     }
@@ -533,13 +546,19 @@ async function getSensorsLogDataByDay(sensorId, fromDate, endDate){
     endDate = getStartOfDay(endDate.getTime());
     var diffDay = Math.round((endDate - fromDate) / (1000 * 3600 * 24));
     var result = [];
+    const startingData = await getSensorsDataByTime(sensorId, null, fromDate, 'day');
+    let startingUsage = startingData?.usage ?? 0;
     for(i=1; i<=diffDay; i++){
         var newEndDate = getEndOfDay(fromDate);
         var data = await getSensorsDataByTime(sensorId, fromDate, newEndDate, 'day');
         if (data == null){
-            data = [new ChartData(getFormattedDatePart(newEndDate, 'day'), 0)];
+            data = new ChartData(getFormattedDatePart(newEndDate, 'day'), 0);
+        }else{
+            let aux = data[0].usage;
+            data = new ChartData(getFormattedDatePart(newEndDate, 'day'), aux-startingUsage);
+            startingUsage = aux;
         }
-        result = [...result, ...data];
+        result.push(data);
         fromDate = new Date(fromDate).setDate(new Date(fromDate).getDate() + 1);
     }
     return result;
@@ -558,16 +577,23 @@ async function getSensorsMonthsLogsData(sensorId, fromDate, endDate){
     var diffMonth = Math.round((endDate - fromDate) / (1000 * 60 * 60 * 24 * 7 * 4));
     console.log(diffMonth);
     var result = [];
+    const startingData = await getSensorsDataByTime(sensorId, null, fromDate, 'month');
+    let startingUsage = startingData?.usage ?? 0;
     for (i=1; i<=diffMonth; i++){
         var newEndDate = getEndOfMonth(fromDate);
         var data = await getSensorsDataByTime(sensorId, fromDate, newEndDate, 'month');
         console.log(data);
         if (data == null){
-            data = [new ChartData(getFormattedDatePart(newEndDate, 'month'), 0)];
+            data = new ChartData(getFormattedDatePart(newEndDate, 'month'), 0);
+        }else{
+            let aux = data[0].usage;
+            data = new ChartData(getFormattedDatePart(newEndDate, 'month'), data[0].usage - startingUsage);
+            startingUsage = aux;
         }
-        result = [...result, ...data];
+        result.push(data);
         fromDate = new Date(fromDate).setMonth(new Date(fromDate).getMonth() + 1);
-        console.log(fromDate);
+        console.log("----");
+        console.log(new Date(fromDate));
     }
     return result;
 }
@@ -815,12 +841,21 @@ exports.getSensorsData = cloudFunctions.https.onRequest(async (request, response
     return response.send({'result': result});
 })
 
+exports.test = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.body.sensorId;
+    const fromDate = new Date(request.body.fromDate);
+    var logsData = await getSensorsDataByTime(sensorId, null, fromDate.getTime(), 'day');
+
+    return response.send({'result': logsData});
+});
+
 exports.getSensorsDataWeb = cloudFunctions.https.onRequest(async (request, response) => {
     const sensorId = request.body.sensorId;
     const fromDate = new Date(request.body.fromDate);
     const toDate = new Date(request.body.toDate);
     const type = request.body.type;
     var result = [];
+    console.log(type);
     switch(type){
         case 'hour':
             result = await getSensorsLogDataByTime(sensorId, fromDate, toDate);

@@ -6,6 +6,8 @@ const Jimp = require('jimp');
 const QrCode = require('qrcode-reader');
 const { error } = require('firebase-functions/logger');
 const { Firestore } = require("firebase-admin/firestore");
+const geofire = require('geofire-common');
+const { DateTime } = require('luxon');
 
 const mqttTopic = 'data';
 var options = {
@@ -20,7 +22,95 @@ var options = {
  * Initialize the configurations
  */
 const mqttClient = mqtt.connect(options);
-admin.initializeApp();
+admin.initializeApp({
+    databaseURL: 'https://console.firebase.google.com/v1/r/project/water-meter-84a08/firestore/indexes?create_composite=Ckxwcm9qZWN0cy93YXRlci1tZXRlci04NGEwOC9kYXRhYmFzZXMvKGRlZmF1bHQpL2NvbGxlY3Rpb25Hcm91cHMvMTgvaW5kZXhlcy9fEAEaDAoIc2Vuc29ySWQQARoQCgxyZWNvcmRlZERhdGUQAhoMCghfX25hbWVfXxAC'
+});
+const cloudFunctions = functions.region('europe-west1');
+const secondsInADay =  60 * 60 * 24;
+
+
+class ResponseError{
+    constructor(resultType){
+        this.resultType = resultType;
+    }
+}
+
+class ChartData{
+    constructor(period, usage){
+        this.period = period;
+        this.usage = usage
+    }
+}
+
+const durationType = {
+    Daily: 'daily',
+    Weekly: 'weekly',
+    Monthly: 'monthly',
+    Year: 'year'
+}
+
+
+function checkDuration(value){
+    return Object.values(durationType).includes(value);
+}
+
+function calculateAverageUsageInLifetime(creationDate, lastUpdateDate, currentUsage){
+    var lifetimeInDays = (lastUpdateDate - creationDate)/secondsInADay;
+    console.log(lifetimeInDays);
+    console.log(lastUpdateDate - creationDate);
+    const result = {};
+
+    if(lifetimeInDays < 1)
+        return result;
+    result["averageDailyUsage"] = currentUsage/(lifetimeInDays);
+
+    if(lifetimeInDays < 7)
+        return result;
+    result["averageWeeklyUsage"] = currentUsage/(lifetimeInDays/7);
+
+    if(lifetimeInDays < 30)
+        return result;
+    result["averageMonthlyUsage"] = currentUsage/(lifetimeInDays/30);
+
+    return result;
+}
+
+function parseSensorData(sensorData, customerId = null, isSuperUser = false){
+    console.log(sensorData);
+    const { currentUsage, sensorId, location, createdAt, updatedAt, currentMonthUsage, currentDayUsage, currentWeekUsage, currentYearUsage } = sensorData;
+    const customAlerts = sensorData.customAlerts || [];
+    const customAlertsResult = [];
+    for (const [type, alertObj] of Object.entries(customAlerts)) {
+        customAlertsResult.push({ type: type, value: alertObj.value });
+    }
+    const { averageDailyUsage, averageWeeklyUsage, averageMonthlyUsage } = calculateAverageUsageInLifetime(createdAt, updatedAt, currentUsage);
+    let generalData = {
+        'currentUsage': currentUsage,
+        'sensorId': sensorId,
+        'customAlerts': customAlertsResult,
+        'location': location,
+        'sensorCreatedAt': createdAt.toDate(),
+        'updatedAt': updatedAt.toDate(),
+        'averageDailyUsage': parseFloat(averageDailyUsage?.toFixed(3)) ?? 0,
+        'averageWeeklyUsage': parseFloat(averageWeeklyUsage?.toFixed(3)) ?? 0,
+        'averageMonthlyUsage': parseFloat(averageMonthlyUsage?.toFixed(3)) ?? 0,
+        'currentDayUsage' : parseFloat(currentDayUsage?.toFixed(3)) ?? 0,
+        'currentMonthUsage': parseFloat(currentMonthUsage?.toFixed(3)) ?? 0,
+        'currentWeekUsage' : parseFloat(currentWeekUsage?.toFixed(3)) ?? 0,
+        'currentYearUsage' : parseFloat(currentYearUsage?.toFixed(3)) ?? currentUsage,
+    };
+
+    if(isSuperUser)
+        return generalData;
+
+    const deviceRelation = sensorData.deviceRelations[customerId];
+    return {
+        ...generalData,
+        "name" : deviceRelation.name,
+        "createdAt" : deviceRelation.createdAt.toDate()
+    };
+}
+
 
 /**
  * interact with firestore
@@ -58,25 +148,75 @@ async function getSensorList() {
 
 async function getCustomersDeviceData(customerId) {
     const data = await admin.firestore().collection('sensors').where(`deviceRelations.${customerId}`, '!=', null).get();
-    const result = [];
-    if (data){
+    const result = {"sensors":[]};
+
+    if (data) {
         data.forEach((sensorDoc) => {
             const sensorData = sensorDoc.data();
-            const { currentUsage, sensorId } = sensorData;
-            const { name, createdAt, id} = sensorData.deviceRelations[customerId];
-            const objData = {
-                'name' : name,
-                'createdAt': new Date(createdAt._nanoseconds),
-                'currentUsage': currentUsage,
-                'id': id,
-                'sensorId': sensorId
-            };
-            result.push(objData);
+            result["sensors"].push(parseSensorData(sensorData,customerId,false));
         });
     } else {
         console.log('not exist');
     }
     return result;
+}
+
+async function getCurrentDayUsage(sensorId, currentUsage) {
+    var toDate = getStartOfDay(new Date().getTime());
+    return getCurrentUsage(sensorId, currentUsage, toDate);
+}
+
+async function getCurrentUsage(sensorId, currentUsage, toDate){
+    const sensorDocRef = await admin.firestore().collection('logs')
+        .where('sensorId', '==', sensorId)
+        .where('recordedDate', '<', toDate)
+        .orderBy('recordedDate', 'desc')
+        .limit(1)
+        .get();
+
+    if (!sensorDocRef.empty) {
+        let currentDayUsage;
+        sensorDocRef.forEach(doc => {
+            const res = doc.data();
+            console.log(res.currentUsage);
+            currentDayUsage = currentUsage - res.currentUsage;
+        });
+        return currentDayUsage.toFixed(2).toString();
+    }
+    return currentUsage;
+}
+
+async function getCountOfSensors(){
+    let count = (await admin.firestore().collection('sensors').count().get()).data();
+    return count;
+}
+
+async function getSensorListPage(size, page) {
+    if (page > 0)
+        page = page-1;
+    let query = admin.firestore().collection('sensors')
+        .orderBy('createdAt', 'asc')
+        .offset(parseInt(page * size))
+        .limit(parseInt(size));
+
+    const sensorDocRef = await query.get();
+
+    if (!sensorDocRef.empty) {
+        return sensorDocRef.docs.map(doc => doc.data());
+    }
+    return [];
+}
+
+function getFirstDayOfMonth(date) {
+    return new Date(date.getFullYear(), date.getMonth(), 1)
+}
+
+async function getCurrentMonthUsage(sensorId) {
+    var toDate = getStartOfDay(getFirstDayOfMonth(new Date()).getTime());
+    const sensor = await getSensorData(sensorId);
+    console.log(sensor.currentUsage);
+    if (sensor == null) return new ResponseError('not found the sensor information');
+    return getCurrentUsage(sensorId, sensor.currentUsage, toDate);
 }
 
 async function deleteCustomersDevice(sensorId, customerId) {
@@ -107,26 +247,357 @@ async function updateSensorCurrentUsage(sensorId, oldValue,  currentUsage) {
     }
 }
 
+
+async function getSensorsAlerts(sensorId) {
+    const sensorDoc = await admin.firestore().collection('sensors').doc(sensorId).get();
+    const result = [];
+    if (!sensorDoc.empty) {
+        const sensorData = sensorDoc.data();
+        const customAlerts = sensorData.customAlerts;
+        for (const [type, alertObj] of Object.entries(customAlerts)) {
+            result.push({ type: type, value: alertObj.value });
+        }
+    }
+    return result;
+}
+
+async function getCustomersSensorsAlerts(customerId) {
+    const sensorDoc = await admin.firestore().collection('sensors').where(`deviceRelations.${customerId}`, '!=', null).get();
+    const customAlertsResult = [];
+    if (sensorDoc){
+        sensorDoc.forEach((sensorDoc) => {
+            const sensorData = sensorDoc.data();
+            const customAlerts = sensorData.customAlerts || [];
+            for (const [type, alertObj] of Object.entries(customAlerts)) {
+                customAlertsResult.push({ type: type, value: alertObj.value });
+            }
+        });
+    } else {
+        console.log('not exist');
+    }
+    return customAlertsResult;
+}
+
 async function addDeviceRelation(sensorId, uuid, name){
     const sensorData = admin.firestore().collection('sensors').doc(sensorId);
     const result = await sensorData.get();
     if (result.exists){
         const data  = result.data();
         const deviceRelations = data.deviceRelations || {}
-        
+
         if (deviceRelations[uuid]) {
             console.log(`UserId ${uuid} already linked to the device`);
+            return new ResponseError('alreadyLinkedDevice');
         } else {
             console.log(`userId ${uuid} does not exist, add new relation`);
-            const time = Firestore.FieldValue.serverTimestamp()
+            const time = Firestore.FieldValue.serverTimestamp();
             deviceRelations[uuid] = {
                 name: name,
-                createdAt: time,
-                id: Date.now()
+                createdAt: time
             };
-            await sensorData.update({deviceRelations});
+
+            const writeResult = await sensorData.update({deviceRelations});
+            return{
+                'resultType' : 'success',
+                'newSensorData' : {
+                'name' : name,
+                'createdAt': writeResult.writeTime.toDate(),
+                'currentUsage': data.currentUsage,
+                'sensorId': data.sensorId,
+                'customAlerts': []
+                }
+            };
         }
     }
+    return new ResponseError('deviceNotExist');
+}
+
+async function addCustomAlert(sensorId, customerId, value, type){
+    if (checkDuration(type)){
+        const sensorData = admin.firestore().collection('sensors').doc(sensorId);
+        const result = await sensorData.get();
+        if (result.exists){
+            const data  = result.data();
+            const deviceRelations = result.deviceRelations || {}
+            if (deviceRelations[customerId]){
+                console.log(`Customer does not connect to the device. customerId: ${customerId}, deviceId: ${sensorId}`);
+                return new ResponseError('noPermission');
+            }
+            const customAlerts = data.customAlerts || {}
+
+            if (customAlerts[type]) {
+                console.log(`Type ${type} is already configured to the device`);
+                return new ResponseError('alreadyExistedType');
+            } else {
+                console.log(`Type ${type} does not exist, add new alert on device. deviceId : ${sensorId}`);
+                const time = Firestore.FieldValue.serverTimestamp();
+                customAlerts[type] = {
+                    value: value,
+                    type: type,
+                    createdAt: time
+                };
+
+                const writeResult = await sensorData.update({customAlerts});
+                return{
+                    'resultType' : 'success',
+                    'newSensorData' : {
+                    'name' : data.name,
+                    'createdAt': writeResult.writeTime.toDate(),
+                    'currentUsage': data.currentUsage,
+                    'sensorId': data.sensorId
+                    }
+                };
+            }
+        }
+    }
+}
+
+
+async function updateCustomAlert(sensorId, value, type) {
+    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
+    await sensorDocRef.set({
+        customAlerts: {
+            [type]: {
+                value: value
+            }
+        }
+    }, { merge: true });
+}
+
+async function deleteCustomAlert(sensorId, type){
+    const sensorDocRef = admin.firestore().collection('sensors').doc(sensorId);
+    await sensorDocRef.update({
+        [`customAlerts.${type}`]: Firestore.FieldValue.delete()
+    });
+}
+
+async function getSensorsNearAPoint(point, radiusInKm)
+{
+    console.log(point);
+    console.log(radiusInKm);
+    //Calculate bounding box values
+    let dY = radiusInKm / 111.11;
+    let dX = dY / Math.cos(geofire.degreesToRadians(point.lat));
+
+    const results = await admin.firestore().collection('sensors')
+        .orderBy("location.longitude")
+        .where("location.latitude", ">=", point.lat - dY)
+        .where("location.latitude", "<=", point.lat + dY)
+        .where("location.longitude", ">=", point.lon - dX)
+        .where("location.longitude", "<=", point.lon + dX).get();
+
+    var dataList = {"sensors":[]};
+    results.forEach(doc => {
+        const data = doc.data();
+        console.log(data);
+        let distance = geofire.distanceBetween([data.location.latitude, data.location.longitude], [point.lat, point.lon]);
+        if(distance <= radiusInKm){
+            const { currentUsage, sensorId, location, createdAt, updatedAt} = data;
+            const { averageDailyUsage, averageWeeklyUsage, averageMonthlyUsage } = calculateAverageUsageInLifetime(createdAt, updatedAt, currentUsage);
+            const generalData = {
+                'currentUsage': currentUsage,
+                'sensorId': sensorId,
+                'location': location,
+                'sensorCreatedAt': createdAt.toDate(),
+                'updatedAt': updatedAt.toDate(),
+                'averageDailyUsage': parseFloat(averageDailyUsage?.toFixed(3)) ?? 0,
+                'averageWeeklyUsage': parseFloat(averageWeeklyUsage?.toFixed(3)) ?? 0,
+                'averageMonthlyUsage': parseFloat(averageMonthlyUsage?.toFixed(3)) ?? 0
+            };
+            dataList["sensors"].push(generalData);
+        }
+    });
+
+    return dataList;
+}
+
+function formatTimestamp(timestamp, type) {
+    const dateTime = DateTime.fromMillis(timestamp).setZone('Europe/Rome');
+    let formattedDate;
+
+    switch (type) {
+        case 'hour':
+            formattedDate = dateTime.toFormat('HH:mm');
+            break;
+        case 'day':
+            formattedDate = dateTime.toFormat('yyyy-MM-dd');
+            break;
+        case 'month':
+            formattedDate = dateTime.toFormat('yyyy-MM');
+            break;
+        case 'year':
+            formattedDate = dateTime.toFormat('yyyy');
+            break;
+        default:
+            throw new Error('Invalid type: ' + type);
+    }
+
+    return formattedDate;
+}
+
+function getFormattedDatePart(timestamp, type) {
+    const dateTime = DateTime.fromMillis(timestamp).setZone('Europe/Rome');
+    let result;
+
+    switch (type) {
+        case 'hour':
+            result = dateTime.hour;
+            break;
+        case 'day':
+            result = dateTime.day;
+            break;
+        case 'month':
+            result = dateTime.month;
+            break;
+        case 'year':
+            result = dateTime.year;
+            break;
+        default:
+            throw new Error('Invalid type: ' + type);
+    }
+
+    return result;
+}
+
+async function getSensorsDataByTime(sensorId, fromDate, toDate, type){
+    console.log(new Date(toDate));
+    let sensorDocRef;
+    if(fromDate == null)
+        sensorDocRef = await admin.firestore().collection('logs')
+            .where('sensorId', '==', sensorId)
+            .where('recordedDate', '<', toDate)
+            .orderBy('recordedDate', 'desc')
+            .limit(1)
+            .get();
+    else
+        sensorDocRef = await admin.firestore().collection('logs')
+            .where('sensorId', '==', sensorId)
+            .where('recordedDate', '>=', fromDate)
+            .where('recordedDate', '<=', toDate)
+            .orderBy('recordedDate', 'desc')
+            .limit(1)
+            .get();
+
+    const result = [];
+    if (!sensorDocRef.empty) {
+        sensorDocRef.forEach(doc => {
+            var res = doc.data();
+            result.push(new ChartData(getFormattedDatePart(res.recordedDate, type),res.currentUsage));
+        });
+    } else {
+        console.log('No data found for period:', fromDate, 'to', toDate);
+        return null;
+    }
+    return result;
+}
+
+function clearMinutes(date){
+    date.setMinutes(0);
+    date.setSeconds(0);
+    date.setMilliseconds(0);
+    return date;
+}
+
+async function getSensorsLastFewHoursData(sensorId, lastHours){
+    const endDate = clearMinutes(new Date());
+    var fromDate = clearMinutes(new Date());
+    fromDate = fromDate.setHours(endDate.getHours() - lastHours);
+    var result = [];
+    for (i=1; i<=lastHours; i++){
+        var data = await getSensorsDataByTime(sensorId, fromDate, endDate.getTime(), 'hour');
+        if (data == null){
+            data = [new ChartData(getFormattedDatePart(fromDate.getTime, 'hour'), 0)];
+        }
+        result = [...result, ...data];
+        fromDate = new Date(fromDate).setHours(new Date(fromDate).getHours() + 1);
+    }
+    return result;
+}
+
+async function getSensorsLogDataByTime(sensorId, fromDate, toDate) {
+    fromDate = clearMinutes(new Date(fromDate));
+    toDate = clearMinutes(new Date(toDate));
+    const hourDiff = Math.ceil((toDate.getTime() - fromDate.getTime()) / (1000 * 60 * 60));
+    let result = [];
+
+    const startingData = await getSensorsDataByTime(sensorId, null, fromDate.getTime(), 'hour');
+    let startingUsage = startingData?.usage ?? 0;
+    for (let i = 0; i < hourDiff; i++) {
+        const nextDate = new Date(fromDate.getTime());
+        nextDate.setHours(fromDate.getHours() + 1);
+
+        const data = await getSensorsDataByTime(sensorId, fromDate.getTime(), nextDate.getTime(), 'hour');
+        
+        if (data === null) {
+            result.push(new ChartData(getFormattedDatePart(fromDate.getTime(), 'hour'), 0));
+        } else {
+            result.push(new ChartData(getFormattedDatePart(fromDate.getTime(), 'hour'), data[0].usage - startingUsage));
+            startingUsage = data[0].usage;
+        }
+        fromDate = nextDate;
+    }
+
+    return result;
+}
+
+
+async function getSensorsLogDataByDay(sensorId, fromDate, endDate){
+    fromDate = getStartOfDay(fromDate.getTime());
+    endDate = getStartOfDay(endDate.getTime());
+    var diffDay = Math.round((endDate - fromDate) / (1000 * 3600 * 24));
+    var result = [];
+    const startingData = await getSensorsDataByTime(sensorId, null, fromDate, 'day');
+    let startingUsage = startingData?.usage ?? 0;
+    for(i=1; i<=diffDay; i++){
+        var newEndDate = getEndOfDay(fromDate);
+        var data = await getSensorsDataByTime(sensorId, fromDate, newEndDate, 'day');
+        if (data == null){
+            data = new ChartData(getFormattedDatePart(newEndDate, 'day'), 0);
+        }else{
+            let aux = data[0].usage;
+            data = new ChartData(getFormattedDatePart(newEndDate, 'day'), aux-startingUsage);
+            startingUsage = aux;
+        }
+        result.push(data);
+        fromDate = new Date(fromDate).setDate(new Date(fromDate).getDate() + 1);
+    }
+    return result;
+}
+
+async function getSensorsLastFewDaysLogData(sensorId, lastFewDays){
+    var toDate = new Date();
+    var fromDate = new Date(new Date().setDate(toDate.getDate() - lastFewDays));
+    return getSensorsLogDataByDay(sensorId, fromDate, toDate);
+}
+
+async function getSensorsMonthsLogsData(sensorId, fromDate, endDate){
+    fromDate = getStartOfMonth(fromDate.getTime());
+    endDate = getEndOfMonth(endDate.getTime());
+    var diffMonth = Math.round((endDate - fromDate) / (1000 * 60 * 60 * 24 * 30));
+    console.log(diffMonth);
+    var result = [];
+    const startingData = await getSensorsDataByTime(sensorId, null, fromDate, 'month');
+    let startingUsage = startingData?.usage ?? 0;
+    for (i=1; i<=diffMonth; i++){
+        var newEndDate = getEndOfMonth(fromDate);
+        var data = await getSensorsDataByTime(sensorId, fromDate, newEndDate, 'month');
+        if (data == null){
+            data = new ChartData(getFormattedDatePart(fromDate, 'month'), 0);
+        }else{
+            let aux = data[0].usage;
+            data = new ChartData(getFormattedDatePart(fromDate, 'month'), data[0].usage - startingUsage);
+            startingUsage = aux;
+        }
+        result.push(data);
+        fromDate = new Date(newEndDate).setDate(new Date(newEndDate).getDate() + 1);
+    }
+    return result;
+}
+
+async function getSensorsLastMonthsLogs(sensorId, lastFewMonths){
+    var endDate = new Date();
+    var fromDate = new Date(new Date().setMonth(endDate.getMonth() - lastFewMonths))
+    return getSensorsMonthsLogsData(sensorId, fromDate, endDate);
 }
 
 
@@ -169,11 +640,65 @@ async function getCustomerId(request) {
 }
 
 
+function getStartOfDay(timestamp) {
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome').startOf('day'); // Start of the day in local time
+    return date.toMillis();
+}
+
+function getEndOfDay(timestamp) {
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome').endOf('day');
+    return date.toMillis();
+}
+
+function getStartOfMonth(timestamp){
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome').startOf('month');
+    return date.toMillis();
+}
+
+function getEndOfMonth(timestamp){
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome').endOf('month');
+    return date.toMillis();
+}
+
+function getHourFromTimestamp(timestamp) {
+    const date = DateTime.fromMillis(timestamp).setZone('Europe/Rome');
+    return date.hour;
+}
+
+function getLocalTimeZone() {
+    return DateTime.local().setZone('Europe/Rome').zoneName;
+}
+
+
 /**
  * Endpoints
  */
 
-exports.getUsers = functions.https.onRequest(async (request, response) => {
+exports.getSensorInfo = cloudFunctions.https.onRequest(async (request, response) => {
+    try {
+        const sensor = request.body.sensorId;
+        response.send(parseSensorData(await getSensorData(sensor), undefined, true));
+    } catch (error) {
+        console.error(error);
+        response.status(500).send('Failed to retrieving sensor data');
+    }
+});
+
+
+exports.getSensorsNearMe = cloudFunctions.https.onRequest(async (request, response) => {
+    try {
+        const location = request.body.location;
+        const radius = request.body.radius;
+        const result = await getSensorsNearAPoint(location, radius);
+        response.send(result);
+    } catch (error) {
+        console.error(error);
+        response.status(500).send('Failed to retrieving sensors near position');
+    }
+});
+
+
+exports.getUsers = cloudFunctions.https.onRequest(async (request, response) => {
     try {
         const result = await getUserList();
         response.send(result);
@@ -183,7 +708,7 @@ exports.getUsers = functions.https.onRequest(async (request, response) => {
     }
 });
 
-exports.getSensorList = functions.https.onRequest(async (request, response) => {
+exports.getSensorList = cloudFunctions.https.onRequest(async (request, response) => {
     try {
         const result = await getSensorList();
         response.send(result);
@@ -193,7 +718,7 @@ exports.getSensorList = functions.https.onRequest(async (request, response) => {
     }
 })
 
-exports.generateQrCode = functions.https.onRequest(async (request, response) => {
+exports.generateQrCode = cloudFunctions.https.onRequest(async (request, response) => {
     try {
         const sensorId = request.query.sensorId;
         if (!sensorId) {
@@ -209,39 +734,55 @@ exports.generateQrCode = functions.https.onRequest(async (request, response) => 
     }
 })
 
-exports.decodeQr = functions.https.onRequest (async (request, response) => {
+exports.addDeviceRelation = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     console.log(customerId);
-    const sensorId = request.body.qrString;
+    const sensorId = request.body.sensorId;
     const deviceName = request.body.name;
     console.log(`receive data from `);
-    if (!sensorId) {
-        response.status(400).send('QrSting has to be not null');
+    if (!sensorId || !deviceName) {
+        response.status(400).send(new ResponseError('missingDatas'));
         return;
     }
     try {
         console.log(sensorId);
-        addDeviceRelation('sensorId' + sensorId, customerId, deviceName);
-        response.send(sensorId);
+        const deviceData = await addDeviceRelation(sensorId, customerId, deviceName);
+        response.send(deviceData);
     } catch(error) {
-        console.error('Failed to decode qr');
-        response.status(500).send('Failed to decode qr string');
+        console.error('Failed to decode qr '+ error);
+        response.status(500).send(new ResponseError('qrDecodingFailed'));
         return;
     }
 })
 
-exports.customersDeviceList = functions.https.onRequest(async (request, response) => {
+exports.getSensorsAlertConfigs = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const sensorId = request.query.sensorId;
+    response.send(await getSensorsAlerts(sensorId));
+})
+
+exports.getSensorsAlertsConfigsForWeb = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.query.sensorId;
+    response.send(await getSensorsAlerts(sensorId));
+})
+
+exports.getCustomersCustomAlerts = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = request.query.customerId;
+    response.send(await getCustomersSensorsAlerts(customerId));
+})
+
+exports.customersDeviceList = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     return response.send(await getCustomersDeviceData(customerId));
 })
 
-exports.deleteDevice = functions.https.onRequest(async (request, response) => {
+exports.deleteDeviceRelation = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     const sensorId = request.body.sensorId;
     return response.send(await deleteCustomersDevice(sensorId, customerId));
 })
 
-exports.updateDeviceName = functions.https.onRequest(async (request, response) => {
+exports.updateDeviceName = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
     const sensorId = request.body.sensorId;
     const newName = request.body.name;
@@ -249,67 +790,167 @@ exports.updateDeviceName = functions.https.onRequest(async (request, response) =
 })
 
 
-exports.addAlert = functions.https.onRequest(async (request, response) => {
+exports.addAlert = cloudFunctions.https.onRequest(async (request, response) => {
     const customerId = await getCustomerId(request);
-    const sensorId = request.body.sensorId;
-    // Todo do add alert
+    const { sensorId, value, type } = request.body;
+    return response.send(await addCustomAlert(sensorId, customerId, value, type));
 })
+
+exports.updateAlert = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const { sensorId, value, type } = request.body;
+    try {
+        await updateCustomAlert(sensorId, value, type)
+        return response.send();
+    } catch(e){
+        response.status(500).send(new ResponseError('failedToUpdateCustomAlert'));
+        return;
+    }
+})
+
+exports.deleteAlert = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const { sensorId, type } = request.body;
+    return response.send(await deleteCustomAlert(sensorId, type));
+})
+
+exports.getSensorsData = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.query.sensorId;
+    const fromDate = new Date(request.query.fromDate);
+    const toDate = new Date(request.query.toDate);
+    const type = request.query.type;
+    var result = [];
+    switch(type){
+        case 'hour':
+            result = await getSensorsLogDataByTime(sensorId, fromDate, toDate);
+            break;
+        case 'day':
+            result = await getSensorsLogDataByDay(sensorId, fromDate, toDate);
+            break;
+        case 'month':
+            result = await getSensorsMonthsLogsData(sensorId, fromDate, toDate);
+            break;
+        default:
+            result = await getSensorsLogDataByTime(sensorId, fromDate, toDate);
+            break;
+    }
+    return response.send({'result': result});
+})
+
+exports.test = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.body.sensorId;
+    const fromDate = new Date(request.body.fromDate);
+    var logsData = await getSensorsDataByTime(sensorId, null, fromDate.getTime(), 'day');
+
+    return response.send({'result': logsData});
+});
+
+exports.getSensorsDataWeb = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.body.sensorId;
+    const fromDate = new Date(request.body.fromDate);
+    const toDate = new Date(request.body.toDate);
+    const type = request.body.type;
+    var result = [];
+    console.log(type);
+    switch(type){
+        case 'hour':
+            result = await getSensorsLogDataByTime(sensorId, fromDate, toDate);
+            break;
+        case 'day':
+            result = await getSensorsLogDataByDay(sensorId, fromDate, toDate);
+            break;
+        case 'month':
+            result = await getSensorsMonthsLogsData(sensorId, fromDate, toDate);
+            break;
+        default:
+            result = await getSensorsLogDataByTime(sensorId, fromDate, toDate);
+            break;
+    }
+    return response.send({'result': result});
+})
+
+exports.getSensorsRecentData = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.query.sensorId;
+    const type = request.query.type;
+    const duration = request.query.duration;
+    var result = []
+    switch(type){
+        case 'hour':
+            result = await getSensorsLastFewHoursData(sensorId, duration);
+            break;
+        case 'day':
+            result = await getSensorsLastFewDaysLogData(sensorId, duration);
+            break;
+        case 'month':
+            result = await getSensorsLastMonthsLogs(sensorId, duration);
+            break;
+        default:
+            result = await getSensorsLastFewHoursData(sensorId, duration);
+            break;
+    }
+
+    return response.send({'result': result});
+})
+
+exports.getSensorsMonthlyUsage = cloudFunctions.https.onRequest(async (request, response) => {
+    const sensorId = request.query.sensorId;
+    const result = await getCurrentMonthUsage(sensorId);
+    response.send({'result': result});
+})
+
+exports.getSensorListWithPagination = cloudFunctions.https.onRequest(async (request, response) => {
+    const page = request.body.page || 0;
+    const size = parseInt(request.body.size) || 20;
+    const result = await getSensorListPage(size, page);
+    const { count } = await getCountOfSensors();
+    response.send({'result': result, 'totalSize': count, 'page': page, 'size':size});
+})
+
 /**
  * MQTT broker code
  */
 
-mqttClient.on('connect', () => {
-    console.log('MQTT client connected');
-    mqttClient.subscribe(mqttTopic, (err) => {
-        if (err) {
-            console.error('Failed to subscribe to topic:', mqttTopic, err);
-        } else {
-            console.log('Subscribed to topic:', mqttTopic);
-        }
-    });
-});
+// mqttClient.on('connect', () => {
+//     console.log('MQTT client connected');
+//     mqttClient.subscribe(mqttTopic, (err) => {
+//         if (err) {
+//             console.error('Failed to subscribe to topic:', mqttTopic, err);
+//         } else {
+//             console.log('Subscribed to topic:', mqttTopic);
+//         }
+//     });
+// });
 
-mqttClient.on('message', async (topic, message) => {
-    console.log('Received message:', topic, message.toString());
+// mqttClient.on('message', async (topic, message) => {
+//     console.log('Received message:', topic, message.toString());
 
-    const data = JSON.parse(message);
-    try {
-        const sensor = getSensorData(`sensorId${data.sensorId}`);
-        const sensorId = 'sensorId' + data.sensorId;
-        if (sensor) {
-            console.log(`Already exist the data ${sensor}`);
-            updateSensorCurrentUsage(sensorId, sensor.currentUsage, data.currentUsage)
-        } else {
-            console.log(`Not exist sensorId: ${sensorId}`);
-            console.log(sensorId);
-            const finalData = {
-                ...data,
-                createdAt: Firestore.FieldValue.serverTimestamp(),
-                lastUpdatedDate: Firestore.FieldValue.serverTimestamp()
-            }
-            await admin.firestore().collection('sensors').doc(sensorId).set(finalData);
-            console.log(`Sensor data saved with sensorId: ${sensorId}`);
-        }
-    } catch (error) {
-        console.error('Error checking sensor:',data.sensorId, error);
-    }
-});
+//     const data = JSON.parse(message);
+//     try {
 
-mqttClient.on('error', (error) => {
-    console.error('MQTT client error:', error);
-});
+//         const sensorData = await admin.firestore().collection('logs').add({...data});
 
-mqttClient.on('close', () => {
-    console.log('MQTT client connection closed');
-});
+//         // await admin.firestore().collection('logs').doc(`${getStartOfDay(data.recordedDate)}`).add(finalData);
+//         console.log(`Sensor data saved with sensorId: ${data.sensorId}`);
+//     } catch (error) {
+//         console.error('Error checking sensor:',data.sensorId, error);
+//     }
+// });
 
-mqttClient.on('reconnect', () => {
-    console.log('MQTT client reconnecting');
-});
+// mqttClient.on('error', (error) => {
+//     console.error('MQTT client error:', error);
+// });
 
-mqttClient.on('offline', () => {
-    console.log('MQTT client offline');
-});
+// mqttClient.on('close', () => {
+//     console.log('MQTT client connection closed');
+// });
+
+// mqttClient.on('reconnect', () => {
+//     console.log('MQTT client reconnecting');
+// });
+
+// mqttClient.on('offline', () => {
+//     console.log('MQTT client offline');
+// });
 
 
 

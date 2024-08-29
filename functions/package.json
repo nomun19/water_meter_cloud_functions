@@ -17,8 +17,11 @@
   "dependencies": {
     "firebase-admin": "^12.1.0",
     "firebase-functions": "^5.0.0",
+    "functions": "file:",
+    "geofire-common": "6.0.0",
     "jimp": "^0.22.12",
     "jsqr": "^1.4.0",
+    "luxon": "3.5.0",
     "mqtt": "^5.7.3",
     "qrcode": "^1.5.3",
     "qrcode-parser": "^2.1.3",

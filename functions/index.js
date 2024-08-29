@@ -600,6 +600,19 @@ async function getSensorsLastMonthsLogs(sensorId, lastFewMonths){
     return getSensorsMonthsLogsData(sensorId, fromDate, endDate);
 }
 
+async function setNotifToken(userId, notifToken){
+    var userDoc =  admin.firestore().collection('users').doc(userId);
+    await userDoc.update({
+        [`notifTokens.${notifToken}`]: Firestore.FieldValue.serverTimestamp()
+    });
+}
+
+async function unsetNotifToken(userId, notifToken){
+    var userDoc =  admin.firestore().collection('users').doc(userId);
+    await userDoc.update({
+        [`notifTokens.${notifToken}`]: Firestore.FieldValue.delete()
+    });
+}
 
 /**
  * Other useful functions
@@ -904,6 +917,18 @@ exports.getSensorListWithPagination = cloudFunctions.https.onRequest(async (requ
     const result = await getSensorListPage(size, page);
     const { count } = await getCountOfSensors();
     response.send({'result': result, 'totalSize': count, 'page': page, 'size':size});
+})
+
+exports.setNotifToken = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const tokenId = request.body.notifToken;
+    return response.send(await setNotifToken(customerId, tokenId));
+})
+
+exports.unsetNotifToken = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    const tokenId = request.body.notifToken;
+    return response.send(await unsetNotifToken(customerId, tokenId));
 })
 
 /**

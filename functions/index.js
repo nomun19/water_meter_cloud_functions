@@ -614,6 +614,27 @@ async function unsetNotifToken(userId, notifToken){
     });
 }
 
+async function getNotificationList(customerId) {
+    const data = await admin.firestore().collection('notifications').doc(customerId).get();
+    const result = {"notifications":[]};
+    if (data) {
+        let notifData = data.data();
+        if(!notifData || !(notifData["notifications"]))
+            return result;
+        Object.entries(notifData["notifications"]).forEach((notif) => {
+           const {title, body} = notif[1];
+            result["notifications"].push({
+                "title" : title,
+                "body" : body,
+                "time" : notif[0]
+            });
+        });
+    } else {
+        console.log('not exist');
+    }
+    return result;
+}
+
 /**
  * Other useful functions
  */
@@ -929,6 +950,11 @@ exports.unsetNotifToken = cloudFunctions.https.onRequest(async (request, respons
     const customerId = await getCustomerId(request);
     const tokenId = request.body.notifToken;
     return response.send(await unsetNotifToken(customerId, tokenId));
+})
+
+exports.getNotificationList = cloudFunctions.https.onRequest(async (request, response) => {
+    const customerId = await getCustomerId(request);
+    return response.send(await getNotificationList(customerId));
 })
 
 /**
